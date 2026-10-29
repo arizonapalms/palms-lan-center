@@ -1,0 +1,18 @@
+* text=auto
+# Visual Basic 6, batch files, VBScript and NSIS need Windows line endings
+*.frm text eol=crlf
+*.bas text eol=crlf
+*.vbp text eol=crlf
+*.bat text eol=crlf
+*.vbs text eol=crlf
+*.nsi text eol=crlf
+*.txt text eol=crlf
+# Linux needs these with Unix line endings
+*.sh text eol=lf
+*.py text eol=lf
+*.c text eol=lf
+# binary
+*.frx binary
+*.res binary
+*.wav binary
+*.ico binary

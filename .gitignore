@@ -1,0 +1,14 @@
+# built programs and third-party files (not part of the source)
+*.exe
+*.dll
+*.ocx
+*.OCX
+# Visual Basic leftovers
+*.vbw
+*.scc
+*.log
+*.oca
+# others
+__pycache__/
+.DS_Store
+Thumbs.db
