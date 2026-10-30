@@ -890,11 +890,11 @@ Begin VB.Form frmCartWizard
          Width           =   6720
       End
       Begin VB.Label lblNotesText
-         Caption         =   "Setup notes: a text file shown to players after installation, for steps each PC needs (for example, entering a CD key)."
+         Caption         =   "Setup notes: a text file shown to players after installation (for example, entering a CD key). Screenshot: a picture of the game for the projector (.jpg, .gif, .bmp or .png)."
          Height          =   450
          Left            =   0
          TabIndex        =   104
-         Top             =   3150
+         Top             =   3060
          Width           =   8280
       End
       Begin VB.Label lblNotes
@@ -902,14 +902,14 @@ Begin VB.Form frmCartWizard
          Height          =   255
          Left            =   0
          TabIndex        =   105
-         Top             =   3810
+         Top             =   3690
          Width           =   1440
       End
       Begin VB.TextBox txtNotes
          Height          =   315
          Left            =   1560
          TabIndex        =   106
-         Top             =   3750
+         Top             =   3630
          Width           =   4275
       End
       Begin VB.CommandButton cmdNotesBrowse
@@ -917,7 +917,7 @@ Begin VB.Form frmCartWizard
          Height          =   345
          Left            =   5955
          TabIndex        =   107
-         Top             =   3735
+         Top             =   3615
          Width           =   1125
       End
       Begin VB.CommandButton cmdNotesView
@@ -925,7 +925,38 @@ Begin VB.Form frmCartWizard
          Height          =   345
          Left            =   7155
          TabIndex        =   108
-         Top             =   3735
+         Top             =   3615
+         Width           =   1125
+      End
+      Begin VB.Label lblShot
+         Caption         =   "Scree&nshot:"
+         Height          =   255
+         Left            =   0
+         TabIndex        =   109
+         Top             =   4200
+         Width           =   1440
+      End
+      Begin VB.TextBox txtShot
+         Height          =   315
+         Left            =   1560
+         TabIndex        =   110
+         Top             =   4140
+         Width           =   4275
+      End
+      Begin VB.CommandButton cmdShotBrowse
+         Caption         =   "Browse..."
+         Height          =   345
+         Left            =   5955
+         TabIndex        =   111
+         Top             =   4125
+         Width           =   1125
+      End
+      Begin VB.CommandButton cmdShotView
+         Caption         =   "Vie&w"
+         Height          =   345
+         Left            =   7155
+         TabIndex        =   112
+         Top             =   4125
          Width           =   1125
       End
    End
@@ -934,7 +965,7 @@ Begin VB.Form frmCartWizard
       Height          =   4650
       Index           =   5
       Left            =   360
-      TabIndex        =   109
+      TabIndex        =   113
       Top             =   1080
       Visible         =   0   'False
       Width           =   8280
@@ -942,14 +973,14 @@ Begin VB.Form frmCartWizard
          Caption         =   "&Save in:"
          Height          =   255
          Left            =   0
-         TabIndex        =   110
+         TabIndex        =   114
          Top             =   60
          Width           =   960
       End
       Begin VB.TextBox txtOut
          Height          =   315
          Left            =   1080
-         TabIndex        =   111
+         TabIndex        =   115
          Top             =   0
          Width           =   5955
       End
@@ -957,7 +988,7 @@ Begin VB.Form frmCartWizard
          Caption         =   "Browse..."
          Height          =   345
          Left            =   7155
-         TabIndex        =   112
+         TabIndex        =   116
          Top             =   -15
          Width           =   1125
       End
@@ -966,7 +997,7 @@ Begin VB.Form frmCartWizard
          ForeColor       =   &H00636163&
          Height          =   420
          Left            =   1080
-         TabIndex        =   113
+         TabIndex        =   117
          Top             =   360
          Width           =   7200
       End
@@ -979,7 +1010,7 @@ Begin VB.Form frmCartWizard
          ScaleHeight     =   164
          ScaleMode       =   3  'Pixel
          ScaleWidth      =   548
-         TabIndex        =   114
+         TabIndex        =   118
          TabStop         =   0   'False
          Top             =   840
          Width           =   8280
@@ -988,7 +1019,7 @@ Begin VB.Form frmCartWizard
          Caption         =   ""
          Height          =   1170
          Left            =   0
-         TabIndex        =   115
+         TabIndex        =   119
          Top             =   3480
          Width           =   8280
       End
@@ -998,7 +1029,7 @@ Begin VB.Form frmCartWizard
       Height          =   4650
       Index           =   6
       Left            =   360
-      TabIndex        =   116
+      TabIndex        =   120
       Top             =   1080
       Visible         =   0   'False
       Width           =   8280
@@ -1006,7 +1037,7 @@ Begin VB.Form frmCartWizard
          Caption         =   ""
          Height          =   255
          Left            =   0
-         TabIndex        =   117
+         TabIndex        =   121
          Top             =   240
          Width           =   8280
       End
@@ -1018,7 +1049,7 @@ Begin VB.Form frmCartWizard
          ScaleHeight     =   20
          ScaleMode       =   3  'Pixel
          ScaleWidth      =   552
-         TabIndex        =   118
+         TabIndex        =   122
          TabStop         =   0   'False
          Top             =   660
          Width           =   8280
@@ -1027,7 +1058,7 @@ Begin VB.Form frmCartWizard
          Caption         =   ""
          Height          =   450
          Left            =   0
-         TabIndex        =   119
+         TabIndex        =   123
          Top             =   1080
          Width           =   8280
       End
@@ -1036,7 +1067,7 @@ Begin VB.Form frmCartWizard
          ForeColor       =   &H00636163&
          Height          =   675
          Left            =   0
-         TabIndex        =   120
+         TabIndex        =   124
          Top             =   1860
          Width           =   8280
       End
@@ -1045,7 +1076,7 @@ Begin VB.Form frmCartWizard
       Caption         =   "< &Back"
       Height          =   345
       Left            =   5325
-      TabIndex        =   121
+      TabIndex        =   125
       Top             =   6030
       Width           =   1125
    End
@@ -1054,7 +1085,7 @@ Begin VB.Form frmCartWizard
       Default         =   -1  'True
       Height          =   345
       Left            =   6450
-      TabIndex        =   122
+      TabIndex        =   126
       Top             =   6030
       Width           =   1125
    End
@@ -1063,7 +1094,7 @@ Begin VB.Form frmCartWizard
       Cancel          =   -1  'True
       Height          =   345
       Left            =   7695
-      TabIndex        =   123
+      TabIndex        =   127
       Top             =   6030
       Width           =   1125
    End
@@ -1198,6 +1229,7 @@ Private mRegTrouble As String
 Private mRegPath As String
 Private mRegAnyway As Boolean
 Private mNotes As String
+Private mShot As String          ' the screenshot for the projector, or ""
 
 ' ---- saving and making
 Private mOut As String
@@ -1305,6 +1337,7 @@ Private Sub ResetAnswers()
     mRegPath = ""
     mRegAnyway = False
     mNotes = ""
+    mShot = ""
     mPrevFile = ""
     mPrevApplied = False
     mBuilt = False
@@ -1320,7 +1353,7 @@ Private Sub ResetAnswers()
     If Eng7zaThere() Then
         lblW7za.Caption = ""
     Else
-        lblW7za.Caption = "7za.exe is missing from " & EngHere() & ". It is needed to make cartridges. Run palms-update.vbs to install it."
+        lblW7za.Caption = "7za.exe is missing from " & EngHere() & ". It is needed to make cartridges. Reinstall Palms LAN Center to put it back."
     End If
 End Sub
 
@@ -1489,6 +1522,7 @@ Private Sub Collect(ByVal n As Integer)
         mRegPath = Trim$(txtRegPath.Text)
         mRegAnyway = (chkRegAnyway.Value = vbChecked)
         mNotes = Trim$(txtNotes.Text)
+        mShot = Trim$(txtShot.Text)
     Case PG_READY
         mOut = Trim$(txtOut.Text)
     End Select
@@ -1513,8 +1547,8 @@ Private Sub DrawHead()
         s = "The programs that start the game. A folder with several games can be made into a multicart."
         ic = IC_JOYSTICK
     Case PG_EXTRAS
-        t = "Registry and Setup Notes"
-        s = "Optional. Most games need neither."
+        t = "Registry, Setup Notes and Screenshot"
+        s = "Optional. Most games need none of these."
         ic = IC_REG
     Case PG_READY
         t = "Ready to Make the Cartridge"
@@ -1691,6 +1725,7 @@ Private Sub FreshGuesses()
     mRegAnyway = False
     If Len(mReg) > 0 Then CheckReg True
     mNotes = ""
+    mShot = ""
     FindGames
 End Sub
 
@@ -1791,6 +1826,7 @@ Private Sub ApplyPrevious()
     mRegFull = ""
     If Len(mReg) > 0 Then CheckReg False
     mNotes = EngPrev("notes_source")
+    mShot = EngPrev("screenshot_source")
     mMore = ""
     mGCount = 0
     n = EngPrevGameCount()
@@ -2297,6 +2333,7 @@ Private Sub FillExtras()
         chkRegAnyway.Value = vbUnchecked
     End If
     txtNotes.Text = mNotes
+    txtShot.Text = mShot
     mFilling = False
     RenderReg
 End Sub
@@ -2412,6 +2449,24 @@ Private Sub cmdNotesBrowse_Click()
     If Len(p) > 0 Then txtNotes.Text = p
 End Sub
 
+Private Sub cmdShotBrowse_Click()
+    Dim p As String, startIn As String
+    startIn = mSrc
+    If Len(EngResolve(txtShot.Text)) > 0 Then startIn = EngParentOf(EngResolve(txtShot.Text))
+    p = PickFile(startIn, "Pictures (*.jpg;*.gif;*.bmp;*.png)|*.jpg;*.jpeg;*.gif;*.bmp;*.png|All files|*.*", "Select a screenshot")
+    If Len(p) > 0 Then txtShot.Text = p
+End Sub
+
+Private Sub cmdShotView_Click()
+    Dim p As String
+    p = EngResolve(Trim$(txtShot.Text))
+    If Len(p) > 0 Then
+        EngOpenFile p
+    Else
+        MsgBox "Select a picture first.", vbExclamation, Caption
+    End If
+End Sub
+
 Private Sub cmdNotesView_Click()
     Dim p As String
     p = EngResolve(Trim$(txtNotes.Text))
@@ -2487,6 +2542,8 @@ Private Function PageProblems(ByVal n As Integer, ByVal firstOnly As Boolean) As
             End If
         End If
         If Len(mNotes) > 0 And Len(EngResolve(mNotes)) = 0 Then AddProblem out, "Setup notes file not found: " & mNotes, txtNotes
+        If Len(mShot) > 0 And Len(EngResolve(mShot)) = 0 Then AddProblem out, "Screenshot not found: " & mShot, txtShot
+        If Len(mShot) > 0 And Not EngIsPicture(mShot) Then AddProblem out, "The screenshot must be a .jpg, .gif, .bmp or .png file.", txtShot
     Case PG_READY
         If Len(mOut) = 0 Then AddProblem out, "Select a folder to save the cartridge in.", txtOut
     End Select
@@ -2681,6 +2738,11 @@ Private Sub PushToEngine()
     Else
         EngSet "notes", ""
     End If
+    If Len(mShot) > 0 Then
+        EngSet "screenshot", EngResolve(mShot)
+    Else
+        EngSet "screenshot", ""
+    End If
     EngSet "output", mOut
     EngClearGames
     If mPack Then
@@ -2726,6 +2788,11 @@ Private Sub DrawSummary()
         SumRow y, "Setup notes", mNotes, False
     Else
         SumRow y, "Setup notes", "none", False
+    End If
+    If Len(mShot) > 0 Then
+        SumRow y, "Screenshot", mShot, False
+    Else
+        SumRow y, "Screenshot", "none", False
     End If
     SumRow y, "Install folder", EngGamesRoot() & mFolder, False
     SumRow y, "Size", NumText(mFiles) & " files, " & mSizeText & ", in " & mPieces & " piece" & Plural(mPieces), False

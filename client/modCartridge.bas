@@ -47,6 +47,7 @@ Private gFolder As String
 Private gReg As String
 Private gRegPath As String
 Private gNotes As String
+Private gShot As String         ' the screenshot, copied in as screenshot.jpg (or .gif, .bmp, .png)
 Private outRoot As String
 
 Private regKeys As Long
@@ -651,6 +652,7 @@ Public Sub EngSet(ByVal key As String, ByVal value As String)
         gRegPath = value
         If Right(gRegPath, 1) = "\" Then gRegPath = Left(gRegPath, Len(gRegPath) - 1)
     Case "notes": gNotes = value
+    Case "screenshot": gShot = value
     Case "output"
         outRoot = value
         If Right(outRoot, 1) = "\" And Len(outRoot) > 3 Then outRoot = Left(outRoot, Len(outRoot) - 1)
@@ -746,7 +748,7 @@ Public Function EngBuildStart(ByVal replaceOld As Boolean) As String
     buildStopped = False
     buildWarn = ""
     If Not fso.FileExists(here & "\7za.exe") Then
-        EngBuildStart = "7za.exe was not found in " & here & ". Run palms-update.vbs to install it."
+        EngBuildStart = "7za.exe was not found in " & here & ". Reinstall Palms LAN Center to put it back."
         Exit Function
     End If
     If fso.FolderExists(buildDir) Then
@@ -856,6 +858,12 @@ Private Function SmallFiles() As String
     End If
     what = "the setup notes file"
     If Len(gNotes) > 0 Then fso.CopyFile gNotes, buildDir & "\notes.txt"
+    If Err.Number <> 0 Then
+        SmallFiles = "Unable to copy " & what & " to the cartridge (" & Err.Description & ")."
+        Exit Function
+    End If
+    what = "the screenshot"
+    If Len(gShot) > 0 Then fso.CopyFile gShot, buildDir & "\screenshot" & PicExt(gShot)
     If Err.Number <> 0 Then
         SmallFiles = "Unable to copy " & what & " to the cartridge (" & Err.Description & ")."
         Exit Function
@@ -1338,6 +1346,11 @@ Private Sub WriteIni(ByVal path As String, ByVal iconName As String, ByVal iconF
     Else
         t.WriteLine "notes = "
     End If
+    If Len(gShot) > 0 Then
+        t.WriteLine "screenshot = screenshot" & PicExt(gShot)
+    Else
+        t.WriteLine "screenshot = "
+    End If
     t.WriteLine "archive = game.7z"
     t.WriteLine "pieces = " & pieces
     t.WriteLine "archive_bytes = " & FormatNumber(archiveBytes, 0, , , False)
@@ -1370,6 +1383,7 @@ Private Sub WriteIni(ByVal path As String, ByVal iconName As String, ByVal iconF
     t.WriteLine "reg_source = " & gReg
     t.WriteLine "reg_path = " & gRegPath
     t.WriteLine "notes_source = " & gNotes
+    t.WriteLine "screenshot_source = " & gShot
     t.WriteLine "output = " & outRoot
     t.Close
 End Sub
@@ -1798,4 +1812,20 @@ Private Function PakDir() As String
     Else
         PakDir = outRoot & "\" & gId & "-r" & gRev
     End If
+End Function
+
+' .jpg, .gif, .bmp or .png (lower case), from a picture's file name. .jpeg becomes .jpg.
+Private Function PicExt(ByVal path As String) As String
+    Dim i As Long
+    i = InStrRev(path, ".")
+    If i > 0 Then PicExt = LCase(Mid(path, i))
+    If PicExt = ".jpeg" Then PicExt = ".jpg"
+End Function
+
+' A picture the Cartridge Server can read: .jpg, .jpeg, .gif, .bmp or .png
+Public Function EngIsPicture(ByVal path As String) As Boolean
+    Select Case PicExt(path)
+    Case ".jpg", ".gif", ".bmp", ".png"
+        EngIsPicture = True
+    End Select
 End Function

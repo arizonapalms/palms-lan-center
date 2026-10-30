@@ -7,6 +7,8 @@
 *.vbs text eol=crlf
 *.nsi text eol=crlf
 *.txt text eol=crlf
+*.ini text eol=crlf
+*.in text eol=crlf
 # Linux needs these with Unix line endings
 *.sh text eol=lf
 *.py text eol=lf

@@ -3,6 +3,7 @@
 votes, tournaments, the Game Library list and the file page."""
 
 import asyncio
+import base64
 import collections
 import configparser
 import datetime
@@ -14,11 +15,10 @@ import random
 import re
 import secrets
 import socket
-import struct
 import subprocess
 import sys
 
-VERSION = '0.5.2'
+VERSION = '0.6.1'
 HERE = pathlib.Path(__file__).resolve().parent
 CONFIG_FILE = HERE / 'palms.ini'
 DATA_DIR = HERE / 'data'
@@ -28,6 +28,7 @@ TPL_FILE = DATA_DIR / 'templates.json'
 MAPS_FILE = DATA_DIR / 'seatmaps.json'
 FOOD_FILE = DATA_DIR / 'food.json'
 CUPS_FILE = DATA_DIR / 'cups.json'
+PROJ_FILE = DATA_DIR / 'projector.json'
 FILES_DIR = HERE / 'files'
 
 NICK_RE = re.compile(r'^[A-Za-z0-9_\-]{2,12}$')
@@ -73,6 +74,9 @@ HELP_TEXT = [
     'SCHEDDEL|id              host only. Remove an event (the ID is the first field in SCHED)',
     'SCHEDNOTE|id|details     host only. Event details, ~ starts a new line. Blank removes them',
     'SCHEDIN|id  SCHEDOUT|id  count yourself in or out of an event',
+    'SCHEDGAME|id|cartridge/game|server|how to connect   host only. The game an event is for, for the projector',
+    'PROJ                     show the projector settings',
+    'PROJSET|seconds|now,sched,cup,vote   host only. Seconds per slide, and the slides to show',
     'VOTEGET                  show the current vote',
     'VOTE|2                   vote for choice 2',
     'VOTESTART|5|question|choice 1|choice 2|...   host only. Minutes, then 2 to 6 choices',
@@ -93,7 +97,6 @@ HELP_TEXT = [
     'LOGOUT|break  or  LOGOUT|home   sign out (break keeps the seat)',
     'PING                     check the connection',
     'QUIT                     disconnect',
-    'QUIT|update              disconnect to install an update (the LAN Center does this itself)',
 ]
 
 
@@ -214,9 +217,12 @@ def load_config():
         cp['server'] = {}
     s = cp['server']
     defaults = {'name': 'PALMS-SRV', 'tcp_port': '4098', 'beacon_port': '4099',
-                'beacon_seconds': '3', 'admin_password': '', 'http_port': '8080',
-                'paks_url': 'http://10.0.200.73/'}
+                'beacon_seconds': '3', 'admin_password': '', 'projector_port': '8080',
+                'file_page': 'off', 'http_port': '8081', 'paks_url': 'http://10.0.200.73/'}
     changed = False
+    # the file page used 8080, which is the projector's now
+    if 'file_page' not in s and s.get('http_port') == '8080':
+        s['http_port'] = '8081'
     for key, value in defaults.items():
         if key not in s:
             s[key] = value
@@ -232,61 +238,31 @@ def load_config():
     return s
 
 
-# ---------------------------------------------------------------- the file page (port 8080)
+# ---------------------------------------------------------------- web pages
 #
-# A small web page every PC at the party can open, even Internet Explorer 6:
-#   http://<server>:8080/                  list of files, upload form
-#   /client/...                            the newest LAN Center program files
-#   /client/manifest.txt                   the list palms-update.vbs downloads
-#   /palms-update.vbs                      installs or updates the LAN Center on a PC
-#   /palms-clean.vbs                       clean slate: wipes the games and settings off a test PC
-# Downloading and uploading are open to everyone on the network. A new version of
-# the LAN Center is published by uploading PalmsLAN.exe with the form on the page: the LAN
-# Center's own files (CLIENT_FILES) go to the LAN Center Files, everything else to Other Files.
+# The projector (projector_port, 8080): slides for the big screen, for Internet Explorer 5 and later.
+#   /                    the slide show: two frames, the next slide loads in the hidden one
+#   /slide?n=3&w=800     slide number 3, laid out for a screen 800 pixels wide
+#   /gif/palm.gif        the palm and the event icons
+# The file page (http_port, 8081), off unless file_page = on in palms.ini: a list of files
+# everyone can download, and a form to upload more.
 
 import html as _html
 import http.server
 import mimetypes
+import socketserver
 import threading
 import time
 import urllib.parse
 
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
 MAX_UPLOAD = 200 * 1024 * 1024
 SAFE_NAME = re.compile(r'[^A-Za-z0-9._()\- ]')
 DOWNLOAD_ONLY = ('.exe', '.ocx', '.dll', '.vbs', '.res', '.frx', '.zip', '.bat', '.reg', '.hta')
-CLIENT_LAST = ('PalmsLAN.exe',)      # fetched last, so a half-finished update never runs
-# Files older versions used. Removed from the LAN Center files when the file page starts.
-RETIRED = ('CartridgeMaker.hta', 'pakmaker.gif', 'palm.ico', 'wget.exe')
-# Uploaded with these names, a file goes to the LAN Center Files, which every PC installs
-CLIENT_FILES = ('PalmsLAN.exe', 'MSWINSCK.OCX', 'palmsget.exe', '7za.exe', 'ding.wav', 'dingdong.wav', 'horn.wav', 'triple.wav')
-
-
-def exe_version(path):
-    """The version in a Windows program's version resource, like 0.7.6, or '' if there isn't one.
-    Visual Basic 6.0 writes Major.Minor.0.Revision there (Project > Properties > Make)."""
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return ''
-    # the VS_VERSION_INFO resource, then its VS_FIXEDFILEINFO, which starts with a signature
-    k = data.find('VS_VERSION_INFO'.encode('utf-16-le'))
-    i = data.find(b'\xbd\x04\xef\xfe', k, k + 64) if k >= 0 else -1
-    if i < 0 or len(data) < i + 16:
-        return ''
-    ms, ls = struct.unpack_from('<II', data, i + 8)
-    major, minor, build, rev = ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF
-    if build:
-        return '%d.%d.%d.%d' % (major, minor, build, rev)
-    return '%d.%d.%d' % (major, minor, rev)
-
-
-def ver_tuple(v):
-    """'0.7.6' -> (0, 7, 6), for comparing versions."""
-    out = []
-    for part in (v or '').split('.')[:4]:
-        m = re.match(r'\d+', part)
-        out.append(int(m.group()) if m else 0)
-    return tuple(out + [0] * (4 - len(out)))
 
 
 def safe_name(raw):
@@ -304,614 +280,36 @@ def nice_size(n):
     return '%.1f MB' % (n / 1024 / 1024)
 
 
-UPDATE_VBS = r'''' Palms LAN Center Setup - installs Palms LAN Center from the Palms Server, or updates it.
-' Windows 98: the first time, save palmsget.exe from the Palms Server file page in the same folder.
-Option Explicit
-Const SERVER = "@@SERVER@@"
+class QuietHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.0'
 
-Dim fso, sh, list, lines, i, name, got, sys32, lnk, ocxOK, auto, startArgs, startStyle, pg, FOLDER
+    def log_message(self, fmt, *args):
+        pass
 
-Set fso = CreateObject("Scripting.FileSystemObject")
-Set sh = CreateObject("WScript.Shell")
-FOLDER = InstallFolder()
-' palmsget.exe downloads on every Windows from 98 on. Without it (a new PC), Windows' own parts
-' are used: MSXML and MDAC 2.5, which XP has and Windows 98 hasn't.
-pg = FindGetter()
-auto = HasArg("/auto")
-startArgs = ""
-startStyle = 1
-If auto Then
-    startArgs = "/updated"
-    If HasArg("/signin") Then startArgs = startArgs & " /signin"
-    If HasArg("/min") Then
-        ' someone is playing a game: start minimized, and don't take the focus
-        startArgs = startArgs & " /min"
-        startStyle = 7
-    End If
-End If
-
-' 1. The program file can't be replaced while it's running
-If IsRunning() Then
-    If auto Then
-        ' Palms LAN Center closes itself after starting this script: give it a few seconds
-        For i = 1 To 20
-            Nap 500
-            If Not IsRunning() Then Exit For
-        Next
-        If IsRunning() Then
-            StopIt
-            Nap 1500
-        End If
-    Else
-        If MsgBox("Palms LAN Center is running. Close it and continue?", vbOKCancel + vbQuestion, "Palms LAN Center Setup") <> vbOK Then WScript.Quit
-        StopIt
-        Nap 1500
-        If IsRunning() Then Fail "Palms LAN Center is still running. Close it, then run palms-update.vbs again."
-    End If
-End If
-
-' 2. Ask the server what to download
-list = GetText(SERVER & "/client/manifest.txt")
-If Len(list) = 0 Then
-    If Len(pg) = 0 Then Fail "Unable to connect to the Palms Server at " & SERVER & "." & vbCrLf & "Check the network connection." & vbCrLf & vbCrLf & _
-        "On Windows 98, save palmsget.exe from the Palms Server file page (" & SERVER & "/) in the same folder as palms-update.vbs, then run it again."
-    Fail "Unable to connect to the Palms Server at " & SERVER & "." & vbCrLf & "Check the network connection."
-End If
-If Not fso.FolderExists(FOLDER) Then fso.CreateFolder FOLDER
-
-' 3. Download each file
-lines = Split(Replace(list, vbCr, ""), vbLf)
-got = 0
-For i = 0 To UBound(lines)
-    name = Trim(lines(i))
-    If Len(name) > 0 Then
-        If Not GetFile(SERVER & "/client/" & name, FOLDER & "\" & name) Then Fail "Unable to download " & name & ". Try again later."
-        got = got + 1
-    End If
-Next
-' the test PC cleanup script (not required to run Palms LAN Center)
-GetFile SERVER & "/palms-clean.vbs", FOLDER & "\palms-clean.vbs"
-If Not fso.FileExists(FOLDER & "\PalmsLAN.exe") Then Fail "PalmsLAN.exe is not available on the server. Upload it on the file page from the development PC first."
-
-' files older versions used
-On Error Resume Next
-For Each name In Array("CartridgeMaker.hta", "pakmaker.gif", "palm.ico", "wget.exe")
-    If InStr(1, vbLf & Replace(list, vbCr, "") & vbLf, vbLf & name & vbLf, vbTextCompare) = 0 Then
-        If fso.FileExists(FOLDER & "\" & name) Then fso.DeleteFile FOLDER & "\" & name, True
-    End If
-Next
-On Error GoTo 0
-
-' 4. Register the network part (MSWINSCK.OCX) if the server has it. When the LAN Center
-'    updates itself it was running a moment ago, so it is registered already.
-On Error Resume Next
-sys32 = fso.GetSpecialFolder(1).Path
-ocxOK = True
-If fso.FileExists(FOLDER & "\MSWINSCK.OCX") And Not (auto And fso.FileExists(sys32 & "\MSWINSCK.OCX")) Then
-    If Not fso.FileExists(sys32 & "\MSWINSCK.OCX") Then fso.CopyFile FOLDER & "\MSWINSCK.OCX", sys32 & "\"
-    ocxOK = False
-    If fso.FileExists(sys32 & "\MSWINSCK.OCX") Then ocxOK = (sh.Run("regsvr32 /s """ & sys32 & "\MSWINSCK.OCX""", 0, True) = 0)
-End If
-
-' 5. Let it through the Windows XP firewall (does nothing on Windows 98)
-sh.Run "netsh firewall add allowedprogram program=""" & FOLDER & "\PalmsLAN.exe"" name=""Palms LAN Center"" mode=ENABLE", 0, True
-
-' 6. Desktop shortcut (Palms LAN Center Setup makes its own, if it was asked to)
-If Not fso.FileExists(FOLDER & "\uninst.exe") Then
-    Set lnk = sh.CreateShortcut(sh.SpecialFolders("Desktop") & "\Palms LAN Center.lnk")
-    lnk.TargetPath = FOLDER & "\PalmsLAN.exe"
-    lnk.WorkingDirectory = FOLDER
-    lnk.Description = "Palms LAN Center"
-    lnk.Save
-End If
-On Error GoTo 0
-
-' 7. Start it
-If Not ocxOK Then
-    MsgBox "Palms LAN Center was updated, but MSWINSCK.OCX could not be registered." & vbCrLf & vbCrLf & _
-           "Log on to Windows as an administrator and run palms-update.vbs again, or register MSWINSCK.OCX manually.", vbExclamation, "Palms LAN Center Setup"
-End If
-StartIt
-If ocxOK And Not auto Then sh.Popup "Palms LAN Center updated (" & got & " files).", 3, "Palms LAN Center Setup", vbInformation
-
-' Something went wrong. When the LAN Center is updating itself, the copy already installed starts again.
-Sub Fail(msg)
-    If auto Then
-        If fso.FileExists(FOLDER & "\PalmsLAN.exe") Then
-            startArgs = Replace(startArgs, "/updated", "/updatefailed")
-            StartIt
-        End If
-    Else
-        MsgBox msg, vbExclamation, "Palms LAN Center Setup"
-    End If
-    WScript.Quit
-End Sub
-
-Sub StartIt()
-    sh.Run """" & FOLDER & "\PalmsLAN.exe"" " & startArgs, startStyle, False
-End Sub
-
-Function HasArg(a)
-    Dim k
-    HasArg = False
-    For k = 0 To WScript.Arguments.Count - 1
-        If LCase(WScript.Arguments(k)) = a Then HasArg = True
-    Next
-End Function
-
-' Where Palms LAN Center is: when it's updating itself, the folder it saved this script in. Otherwise
-' the folder it last ran from (program_folder in the registry), or C:\PalmsLAN.
-Function InstallFolder()
-    Dim f, b
-    InstallFolder = "C:\PalmsLAN"
-    If HasArg("/auto") Then
-        f = fso.GetParentFolderName(WScript.ScriptFullName)
-        If fso.FileExists(f & "\PalmsLAN.exe") Then
-            InstallFolder = f
-            Exit Function
-        End If
-    End If
-    For Each b In Array("HKLM\Software\Palms Arcade", "HKLM\Software\Wow6432Node\Palms Arcade")
-        f = RegValue(b & "\LAN Center\program_folder")
-        If Len(f) > 0 Then
-            If fso.FolderExists(f) Then
-                InstallFolder = f
-                Exit Function
-            End If
-        End If
-    Next
-End Function
-
-' A registry value, or "" when it isn't there
-Function RegValue(path)
-    On Error Resume Next
-    RegValue = ""
-    RegValue = CStr(sh.RegRead(path))
-    If Err.Number <> 0 Then RegValue = ""
-End Function
-
-' palmsget.exe, copied to the temporary folder so it can update itself. "" if there's none.
-Function FindGetter()
-    Dim src, dst
-    FindGetter = ""
-    src = FOLDER & "\palmsget.exe"
-    If Not fso.FileExists(src) Then src = fso.GetParentFolderName(WScript.ScriptFullName) & "\palmsget.exe"
-    If Not fso.FileExists(src) Then Exit Function
-    dst = fso.GetSpecialFolder(2).Path & "\palmsget-setup.exe"
-    On Error Resume Next
-    fso.CopyFile src, dst, True
-    If fso.FileExists(dst) Then FindGetter = dst
-End Function
-
-Function Cachebust(url)
-    Cachebust = url & "?t=" & Replace(CStr(Timer), ",", ".")
-End Function
-
-Function GetText(url)
-    Dim x, tmp, f
-    On Error Resume Next
-    GetText = ""
-    If Len(pg) > 0 Then
-        tmp = fso.GetSpecialFolder(2).Path & "\palms-setup.txt"
-        If GetFile(url, tmp) Then
-            Set f = fso.OpenTextFile(tmp, 1)
-            GetText = f.ReadAll
-            f.Close
-            fso.DeleteFile tmp
-        End If
-        Exit Function
-    End If
-    Set x = CreateObject("MSXML2.XMLHTTP")
-    x.Open "GET", Cachebust(url), False
-    x.Send
-    If Err.Number = 0 Then
-        If x.Status = 200 Then GetText = x.responseText
-    End If
-End Function
-
-Function GetFile(url, path)
-    Dim x, st, rc
-    On Error Resume Next
-    GetFile = False
-    If Len(pg) > 0 Then
-        ' into a .new file first, so a broken download never replaces a good file
-        If fso.FileExists(path & ".new") Then fso.DeleteFile path & ".new", True
-        rc = sh.Run("""" & pg & """ -t 3 -T 30 -o """ & fso.GetSpecialFolder(2).Path & "\palms-setup.log"" -O """ & path & ".new"" """ & Cachebust(url) & """", 0, True)
-        If rc <> 0 Or Not fso.FileExists(path & ".new") Then Exit Function
-        Err.Clear
-        If fso.FileExists(path) Then fso.DeleteFile path, True
-        fso.MoveFile path & ".new", path
-        GetFile = (Err.Number = 0)
-        Exit Function
-    End If
-    Set x = CreateObject("MSXML2.XMLHTTP")
-    x.Open "GET", Cachebust(url), False
-    x.Send
-    If Err.Number <> 0 Then Exit Function
-    If x.Status <> 200 Then Exit Function
-    Set st = CreateObject("ADODB.Stream")
-    st.Type = 1
-    st.Open
-    st.Write x.responseBody
-    st.SaveToFile path, 2
-    st.Close
-    GetFile = (Err.Number = 0)
-End Function
-
-Function IsRunning()
-    Dim wmi, procs
-    On Error Resume Next
-    IsRunning = False
-    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
-    Set procs = wmi.ExecQuery("SELECT * FROM Win32_Process WHERE Name = 'PalmsLAN.exe'")
-    If Err.Number = 0 Then
-        IsRunning = (procs.Count > 0)
-    Else
-        ' Windows 98 has no WMI: a running program's file can't be opened for writing
-        IsRunning = InUse(FOLDER & "\PalmsLAN.exe")
-    End If
-End Function
-
-Function InUse(path)
-    Dim f
-    InUse = False
-    If Not fso.FileExists(path) Then Exit Function
-    On Error Resume Next
-    Set f = fso.OpenTextFile(path, 8, False)
-    If Err.Number <> 0 Then
-        InUse = True
-    Else
-        f.Close
-    End If
-End Function
-
-' Waits. Windows 98's Script Host 1.0 has no WScript.Sleep: ping waits about a second a try.
-Sub Nap(ms)
-    On Error Resume Next
-    WScript.Sleep ms
-    If Err.Number <> 0 Then
-        Err.Clear
-        sh.Run "ping -n " & (Int(ms / 1000) + 2) & " 127.0.0.1", 0, True
-    End If
-End Sub
-
-Sub StopIt()
-    Dim wmi, p, exe
-    On Error Resume Next
-    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
-    For Each p In wmi.ExecQuery("SELECT * FROM Win32_Process")
-        ' the LAN Center, and the Game Library's helpers if they're busy installing a game
-        exe = LCase(p.ExecutablePath)
-        If LCase(p.Name) = "palmslan.exe" Then
-            p.Terminate
-        ElseIf (LCase(p.Name) = "palmsget.exe" Or LCase(p.Name) = "wget.exe" Or LCase(p.Name) = "7za.exe") And InStr(exe, LCase(FOLDER) & "\") = 1 Then
-            p.Terminate
-        End If
-    Next
-End Sub
-'''
-
-CLEAN_VBS = r'''' Palms LAN Center Cleanup - resets a PC: removes every game Palms LAN Center installed, and its settings.
-' /quiet: asks nothing (the uninstaller runs it like this).
-Option Explicit
-Const FOLDER = "C:\PalmsLAN"
-
-Dim fso, sh, here, games, root, ids, i, id, sec, place, keys, k, regText, removed, kept, msg, t, progs, lnks, menu, base, quiet
-
-Set fso = CreateObject("Scripting.FileSystemObject")
-Set sh = CreateObject("WScript.Shell")
-
-' the LAN Center's folder: where this script is, if PalmsLAN.exe is there too
-here = fso.GetParentFolderName(WScript.ScriptFullName)
-If Not fso.FileExists(here & "\PalmsLAN.exe") Then here = FOLDER
-
-quiet = (WScript.Arguments.Count > 0)
-If quiet Then quiet = (LCase(WScript.Arguments(0)) = "/quiet")
-If Not quiet Then
-    If MsgBox("This removes all games installed by Palms LAN Center on this PC, including their registry " & _
-              "settings and Windows Firewall exceptions, any incomplete downloads, and the Palms LAN Center settings." & vbCrLf & vbCrLf & _
-              "Configuration files and saved games in the game folders are also deleted. The Palms LAN Center program is not removed." & vbCrLf & vbCrLf & _
-              "Continue?", vbOKCancel + vbExclamation + vbDefaultButton2, "Palms LAN Center Cleanup") <> vbOK Then WScript.Quit
-End If
-
-' 1. Close the LAN Center, so nothing is in use
-If IsRunning() Then
-    StopIt
-    Nap 1500
-    If IsRunning() And Not quiet Then
-        MsgBox "Close Palms LAN Center first, then run palms-clean.vbs again.", vbExclamation, "Palms LAN Center Cleanup"
-        WScript.Quit
-    End If
-End If
-
-' 2. Each game it installed: from the registry, and from gamepaks.ini (older versions)
-base = RegBase()
-Set games = ReadIni(here & "\gamepaks.ini")
-If Len(base) > 0 Then AddRegGames games
-root = Setting("games_folder")
-If Len(root) = 0 Then root = "C:\LANPartyGames"
-removed = ""
-kept = ""
-regText = ""
-If games.Exists("installed") Then
-    ids = Split(IniValue(games, "installed", "list"), ",")
-    For i = 0 To UBound(ids)
-        id = LCase(Trim(ids(i)))
-        If Len(id) > 0 Then regText = regText & "[-HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\PalmsArcade_" & id & "]" & vbCrLf & vbCrLf
-        If Len(id) > 0 And games.Exists(id) Then
-            Set sec = games(id)
-            place = Get1(sec, "folder")
-            ' the firewall exceptions for its programs (a pack can have several). No netsh on Windows 98.
-            progs = Get1(sec, "programs")
-            If Len(progs) = 0 Then progs = Get1(sec, "exe")
-            progs = Split(progs, ";")
-            For k = 0 To UBound(progs)
-                If Len(Trim(progs(k))) > 0 And Len(place) > 0 Then
-                    On Error Resume Next
-                    sh.Run "netsh firewall delete allowedprogram program=""" & place & "\" & Trim(progs(k)) & """", 0, True
-                    On Error GoTo 0
-                End If
-            Next
-            ' its Start menu shortcuts
-            lnks = Split(Get1(sec, "shortcuts"), ";")
-            For k = 0 To UBound(lnks)
-                If LCase(Right(Trim(lnks(k)), 4)) = ".lnk" Then
-                    On Error Resume Next
-                    If fso.FileExists(Trim(lnks(k))) Then fso.DeleteFile Trim(lnks(k)), True
-                    On Error GoTo 0
-                End If
-            Next
-            ' its registry keys, removed all at once below
-            keys = Split(Get1(sec, "regkeys"), ";")
-            For k = 0 To UBound(keys)
-                If Len(Trim(keys(k))) > 0 Then regText = regText & "[-" & Trim(keys(k)) & "]" & vbCrLf & vbCrLf
-            Next
-            ' its folder
-            If SafeFolder(place) Then
-                On Error Resume Next
-                If fso.FolderExists(place) Then fso.DeleteFolder place, True
-                On Error GoTo 0
-                If fso.FolderExists(place) Then
-                    kept = kept & "    " & place & vbCrLf
-                Else
-                    removed = removed & "    " & Get1(sec, "name") & vbCrLf
-                End If
-            End If
-        End If
-    Next
-End If
-' and the LAN Center's own settings and list of games
-regText = regText & "[-HKEY_LOCAL_MACHINE\Software\Palms Arcade]" & vbCrLf & vbCrLf
-Set t = fso.CreateTextFile(fso.GetSpecialFolder(2).Path & "\palms-clean.reg", True, False)
-t.Write "REGEDIT4" & vbCrLf & vbCrLf & regText
-t.Close
-' Palms LAN Center and 32-bit games keep their settings on the 32-bit side: on 64-bit Windows that's SysWOW64's regedit
-t = fso.GetSpecialFolder(0).Path & "\SysWOW64\regedit.exe"
-If Not fso.FileExists(t) Then t = "regedit"
-sh.Run """" & t & """ /s """ & fso.GetSpecialFolder(2).Path & "\palms-clean.reg""", 0, True
-On Error Resume Next
-fso.DeleteFile fso.GetSpecialFolder(2).Path & "\palms-clean.reg"
-On Error GoTo 0
-
-' 3. Half-finished downloads, and the games folder itself if nothing else is in it
-On Error Resume Next
-If fso.FolderExists(root & "\_downloads") Then fso.DeleteFolder root & "\_downloads", True
-If fso.FolderExists(root) Then
-    If fso.GetFolder(root).Files.Count = 0 And fso.GetFolder(root).SubFolders.Count = 0 Then fso.DeleteFolder root, True
-End If
-
-' The Start menu folder the shortcuts were in, if it's empty now
-menu = sh.SpecialFolders("Programs") & "\Palms Arcade Games"
-If fso.FolderExists(menu) Then
-    If fso.GetFolder(menu).Files.Count = 0 And fso.GetFolder(menu).SubFolders.Count = 0 Then fso.DeleteFolder menu, True
-End If
-
-' 4. Settings files from older versions, cached game icons and work files
-For Each t In Array("palms.ini", "gamepaks.ini", "palms.ini.old", "gamepaks.ini.old")
-    If fso.FileExists(here & "\" & t) Then fso.DeleteFile here & "\" & t, True
-Next
-If fso.FolderExists(here & "\icons") Then fso.DeleteFolder here & "\icons", True
-If fso.FolderExists(here & "\temp") Then fso.DeleteFolder here & "\temp", True
-On Error GoTo 0
-
-msg = "Cleanup complete. The Palms Server will treat this PC as a new PC." & vbCrLf & vbCrLf
-If Len(removed) > 0 Then
-    msg = msg & "Games removed:" & vbCrLf & removed & vbCrLf
-Else
-    msg = msg & "No games were installed." & vbCrLf & vbCrLf
-End If
-If Len(kept) > 0 Then msg = msg & "The following folders could not be removed completely. A game may still be running:" & vbCrLf & kept & vbCrLf
-If Not quiet Then MsgBox msg, vbInformation, "Palms LAN Center Cleanup"
-
-' ---------------------------------------------------------------- the registry
-' Where Palms LAN Center keeps its settings, or "" if it hasn't any. It is a 32-bit program:
-' on 64-bit Windows its HKEY_LOCAL_MACHINE\Software is Software\Wow6432Node.
-Function RegBase()
-    Dim b
-    RegBase = ""
-    For Each b In Array("HKLM\Software\Palms Arcade", "HKLM\Software\Wow6432Node\Palms Arcade")
-        If Len(RegValue(b & "\LAN Center\pcid")) > 0 Or Len(RegValue(b & "\Games\Installed")) > 0 Then
-            RegBase = b
-            Exit Function
-        End If
-    Next
-End Function
-
-' A value, or "" when it isn't there
-Function RegValue(path)
-    On Error Resume Next
-    RegValue = ""
-    RegValue = CStr(sh.RegRead(path))
-    If Err.Number <> 0 Then RegValue = ""
-End Function
-
-' The installed games in the registry, added to the ones from gamepaks.ini
-Sub AddRegGames(d)
-    Dim list, ids2, j, gid, inner, key, both
-    list = RegValue(base & "\Games\Installed")
-    If Len(list) = 0 Then Exit Sub
-    both = IniValue(d, "installed", "list")
-    If Len(both) > 0 Then both = both & ","
-    If Not d.Exists("installed") Then d.Add "installed", NewDict()
-    Set inner = d("installed")
-    inner("list") = both & list
-    ids2 = Split(list, ",")
-    For j = 0 To UBound(ids2)
-        gid = LCase(Trim(ids2(j)))
-        If Len(gid) > 0 And Not d.Exists(gid) Then
-            Set inner = NewDict()
-            For Each key In Array("name", "folder", "programs", "exe", "shortcuts", "regkeys")
-                inner(key) = RegValue(base & "\Games\" & gid & "\" & key)
-            Next
-            d.Add gid, inner
-        End If
-    Next
-End Sub
-
-' A LAN Center setting: the registry, or palms.ini (older versions)
-Function Setting(key)
-    Setting = ""
-    If Len(base) > 0 Then Setting = RegValue(base & "\LAN Center\" & key)
-    If Len(Setting) = 0 Then Setting = IniValue(ReadIni(here & "\palms.ini"), "client", key)
-End Function
-
-' ---------------------------------------------------------------- the old .ini files
-Function NewDict()
-    Dim d
-    Set d = CreateObject("Scripting.Dictionary")
-    d.CompareMode = 1
-    Set NewDict = d
-End Function
-
-' An .ini file as a dictionary of sections, each a dictionary of key = value
-Function ReadIni(path)
-    Dim d, f, lines, i, line, cur, p, inner
-    Set d = NewDict()
-    Set ReadIni = d
-    If Not fso.FileExists(path) Then Exit Function
-    If fso.GetFile(path).Size = 0 Then Exit Function
-    Set f = fso.OpenTextFile(path, 1, False, 0)
-    lines = Split(Replace(f.ReadAll, vbCr, ""), vbLf)
-    f.Close
-    cur = ""
-    For i = 0 To UBound(lines)
-        line = Trim(lines(i))
-        If Left(line, 1) = "[" And Right(line, 1) = "]" Then
-            cur = LCase(Mid(line, 2, Len(line) - 2))
-            If Not d.Exists(cur) Then d.Add cur, NewDict()
-        ElseIf Len(cur) > 0 Then
-            p = InStr(line, "=")
-            If p > 1 Then
-                Set inner = d(cur)
-                inner(LCase(Trim(Left(line, p - 1)))) = Trim(Mid(line, p + 1))
-            End If
-        End If
-    Next
-End Function
-
-Function IniValue(d, section, key)
-    IniValue = ""
-    If d.Exists(section) Then IniValue = Get1(d(section), key)
-End Function
-
-Function Get1(sec, key)
-    Get1 = ""
-    If sec.Exists(key) Then Get1 = sec(key)
-End Function
-
-' Never a drive, the Windows folder or Program Files, whatever the list of games says
-Function SafeFolder(p)
-    Dim low
-    SafeFolder = False
-    low = LCase(p)
-    If Len(p) < 4 Or Mid(p, 2, 2) <> ":\" Or InStr(p, "..") > 0 Then Exit Function
-    If low = LCase(fso.GetSpecialFolder(0).Path) Or low = LCase(sh.ExpandEnvironmentStrings("%ProgramFiles%")) Then Exit Function
-    If low = LCase(here) Or low = LCase(root) Then Exit Function
-    SafeFolder = True
-End Function
-
-' ---------------------------------------------------------------- the running program
-Function IsRunning()
-    Dim wmi, p
-    On Error Resume Next
-    IsRunning = False
-    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
-    If Err.Number <> 0 Then
-        ' Windows 98 has no WMI: a running program's file can't be opened for writing
-        Err.Clear
-        IsRunning = InUse(here & "\PalmsLAN.exe")
-        Exit Function
-    End If
-    For Each p In wmi.ExecQuery("SELECT * FROM Win32_Process")
-        If LCase(p.Name) = "palmslan.exe" Then IsRunning = True
-    Next
-End Function
-
-Function InUse(path)
-    Dim f
-    InUse = False
-    If Not fso.FileExists(path) Then Exit Function
-    On Error Resume Next
-    Set f = fso.OpenTextFile(path, 8, False)
-    If Err.Number <> 0 Then
-        InUse = True
-    Else
-        f.Close
-    End If
-End Function
-
-Sub StopIt()
-    Dim wmi, p
-    On Error Resume Next
-    Set wmi = GetObject("winmgmts:\\.\root\cimv2")
-    If Err.Number <> 0 Then Exit Sub
-    For Each p In wmi.ExecQuery("SELECT * FROM Win32_Process")
-        Select Case LCase(p.Name)
-        Case "palmslan.exe", "palmsget.exe", "wget.exe", "7za.exe"
-            p.Terminate
-        End Select
-    Next
-End Sub
-
-' Waits. Windows 98's Script Host 1.0 has no WScript.Sleep: ping waits about a second a try.
-Sub Nap(ms)
-    On Error Resume Next
-    WScript.Sleep ms
-    If Err.Number <> 0 Then
-        Err.Clear
-        sh.Run "ping -n " & (Int(ms / 1000) + 2) & " 127.0.0.1", 0, True
-    End If
-End Sub
-'''
-
-
-def make_files_handler(root, server_name):
-    client_dir = root / 'client'
-
-    class FilesHandler(http.server.BaseHTTPRequestHandler):
-        server_version = 'PalmsFiles/' + VERSION
-        protocol_version = 'HTTP/1.0'
-
-        def log_message(self, fmt, *args):
-            pass                                  # quiet; uploads are logged below
-
-        # ----- helpers
-        def base_url(self):
-            host = self.headers.get('Host') or ('%s:%d' % self.server.server_address)
-            return 'http://' + host
-
-        def send_bytes(self, code, data, ctype, extra=None):
-            self.send_response(code)
-            self.send_header('Content-Type', ctype)
-            self.send_header('Content-Length', str(len(data)))
+    def send_bytes(self, code, data, ctype, extra=None, cache=False):
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(data)))
+        if cache:
+            self.send_header('Cache-Control', 'max-age=86400')
+        else:
             self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
             self.send_header('Pragma', 'no-cache')
             self.send_header('Expires', '0')
-            for k, v in (extra or {}).items():
-                self.send_header(k, v)
-            self.end_headers()
-            if self.command != 'HEAD':
-                self.wfile.write(data)
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(data)
+
+    def do_HEAD(self):
+        self.do_GET()
+
+
+def make_files_handler(root, server_name):
+
+    class FilesHandler(QuietHandler):
+        server_version = 'PalmsFiles/' + VERSION
 
         def resolve(self, url_path):
             """A real file under the files folder, or None. Never anything outside it."""
@@ -921,42 +319,12 @@ def make_files_handler(root, server_name):
                 p.relative_to(root.resolve())
             except (ValueError, OSError):
                 return None
-            return p if p.is_file() else None
-
-        def save(self, folder, raw_name, data, who):
-            name = safe_name(raw_name)
-            if not name:
-                return None, 'Invalid file name.'
-            folder.mkdir(parents=True, exist_ok=True)
-            tmp = folder / ('.%s.part' % name)
-            try:
-                tmp.write_bytes(data)
-                os.replace(tmp, folder / name)
-            except OSError as e:
-                return None, ("Unable to save files in %s (%s). On the server, run: chown -R palms:palms %s"
-                              % (folder, e.strerror, root))
-            log('File page: %s uploaded %s (%s) from %s.' % (who, folder.name + '/' + name, nice_size(len(data)), self.client_address[0]))
-            return name, None
-
-        def manifest(self):
-            names = sorted(p.name for p in client_dir.glob('*') if p.is_file() and not p.name.startswith('.'))
-            names = [n for n in names if n not in CLIENT_LAST] + [n for n in CLIENT_LAST if n in names]
-            return ('\r\n'.join(names) + '\r\n').encode()
-
-        # ----- GET and HEAD
-        def do_HEAD(self):
-            self.do_GET()
+            return p if p.is_file() and not p.name.startswith('.') else None
 
         def do_GET(self):
             path = self.path.split('?', 1)[0]
             if path in ('/', '/index.html'):
-                return self.send_bytes(200, self.index_page().encode('utf-8'), 'text/html; charset=utf-8')
-            if path == '/client/manifest.txt':
-                return self.send_bytes(200, self.manifest(), 'text/plain')
-            if path in ('/palms-update.vbs', '/palms-clean.vbs'):
-                body = {'/palms-update.vbs': UPDATE_VBS, '/palms-clean.vbs': CLEAN_VBS}[path].replace('@@SERVER@@', self.base_url())
-                return self.send_bytes(200, body.replace('\n', '\r\n').encode('cp1252'), 'application/octet-stream',
-                                       {'Content-Disposition': 'attachment; filename="%s"' % path[1:]})
+                return self.page_with('')
             p = self.resolve(path)
             if not p:
                 return self.send_bytes(404, b'File not found.', 'text/plain')
@@ -967,92 +335,59 @@ def make_files_handler(root, server_name):
                 extra['Content-Disposition'] = 'attachment; filename="%s"' % p.name
             self.send_bytes(200, p.read_bytes(), ctype, extra)
 
-        # ----- POST /upload from the form on the page
         def do_POST(self):
             if self.path.split('?', 1)[0] != '/upload':
                 return self.send_bytes(404, b'File not found.', 'text/plain')
             length = int(self.headers.get('Content-Length') or 0)
-            ctype = self.headers.get('Content-Type', '')
-            m = re.search(r'boundary=("?)([^";]+)\1', ctype)
+            m = re.search(r'boundary=("?)([^";]+)\1', self.headers.get('Content-Type', ''))
             if not m or length <= 0:
                 return self.page_with('Select a file to upload.', bad=True)
             if length > MAX_UPLOAD:
                 self.rfile.read(length)
                 return self.page_with('File too large. Maximum file size: %s.' % nice_size(MAX_UPLOAD), bad=True)
             body = self.rfile.read(length)
-            fields, filename, data = {}, '', None
+            filename, data = '', None
             for part in body.split(b'--' + m.group(2).encode()):
                 head, sep, content = part.partition(b'\r\n\r\n')
                 if not sep:
                     continue
                 if content.endswith(b'\r\n'):
                     content = content[:-2]
-                disp = head.decode('latin-1')
-                fname = re.search(r'name="([^"]*)"', disp)
-                fn = re.search(r'filename="([^"]*)"', disp)
+                fn = re.search(r'filename="([^"]*)"', head.decode('latin-1'))
                 if fn is not None:
                     filename, data = fn.group(1), content
-                elif fname:
-                    fields[fname.group(1)] = content.decode('utf-8', 'replace')
-            if not filename or not data:
+            name = safe_name(filename)
+            if not name or not data:
                 return self.page_with('Select a file to upload.', bad=True)
-            # the LAN Center's own files go where palms-update.vbs and the updates find them, named exactly
-            known = {n.lower(): n for n in CLIENT_FILES}
-            folder, old = root, ''
-            if safe_name(filename).lower() in known:
-                folder, filename = client_dir, known[safe_name(filename).lower()]
-                if filename == 'PalmsLAN.exe':
-                    old = exe_version(client_dir / filename)
-            name, err = self.save(folder, filename, data, 'the upload form')
-            if err:
-                return self.page_with(err, bad=True)
-            if folder is not client_dir:
-                return self.page_with('Uploaded %s to Other Files.' % name)
-            if name != 'PalmsLAN.exe':
-                return self.page_with('Uploaded %s to LAN Center Files. palms-update.vbs installs it on each PC.' % name)
-            new = exe_version(client_dir / name)
-            if not new:
-                return self.page_with('Uploaded PalmsLAN.exe to LAN Center Files, but its version could not be read. '
-                                      'PCs do not update to it automatically.', bad=True)
-            if old and ver_tuple(new) == ver_tuple(old):
-                return self.page_with('Uploaded PalmsLAN.exe %s to LAN Center Files. This is the same version as before, so PCs '
-                                      'do not update. In Visual Basic, raise the version (Project > Properties > Make), '
-                                      'then make PalmsLAN.exe and upload it again.' % new, bad=True)
-            if old and ver_tuple(new) < ver_tuple(old):
-                return self.page_with('Uploaded PalmsLAN.exe %s to LAN Center Files. It is older than the version it replaced '
-                                      '(%s), so PCs do not update to it.' % (new, old), bad=True)
-            self.page_with('Published Palms LAN Center %s. PCs with 0.7.6 or later update themselves within a minute. '
-                           'Run palms-update.vbs on new PCs and on PCs with an earlier version.' % new)
+            tmp = root / ('.%s.part' % name)
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+                tmp.write_bytes(data)
+                os.replace(tmp, root / name)
+            except OSError as e:
+                return self.page_with('Unable to save the file (%s). On the server, run: chown -R palms:palms %s'
+                                      % (e.strerror, root), bad=True)
+            log('File page: %s uploaded (%s) from %s.' % (name, nice_size(len(data)), self.client_address[0]))
+            self.page_with('Uploaded %s.' % name)
 
         def page_with(self, msg, bad=False):
-            self.send_bytes(200, self.index_page(msg, bad).encode('utf-8'), 'text/html; charset=utf-8')
-
-        # ----- the page itself: plain HTML that Internet Explorer 6 is happy with
-        def index_page(self, msg='', bad=False):
-            def rows(folder, prefix):
-                items = sorted((p for p in folder.glob('*') if p.is_file() and not p.name.startswith('.')),
-                               key=lambda p: p.name.lower())
-                if not items:
-                    return '<tr><td colspan="3" class="none">No files.</td></tr>'
-                out = []
-                for p in items:
-                    st = p.stat()
-                    out.append('<tr><td><a href="%s%s">%s</a></td><td class="r">%s</td><td>%s</td></tr>' % (
-                        prefix, urllib.parse.quote(p.name), _html.escape(p.name), nice_size(st.st_size),
-                        time.strftime('%a %d %b, %I:%M %p', time.localtime(st.st_mtime)).replace(' 0', ' ')))
-                return ''.join(out)
-            note = ''
-            if msg:
-                note = '<p class="%s">%s</p>' % ('bad' if bad else 'good', _html.escape(msg))
-            return PAGE % {
-                'name': _html.escape(server_name), 'note': note,
-                'client_rows': rows(client_dir, '/client/'), 'other_rows': rows(root, '/'),
-                'limit': nice_size(MAX_UPLOAD)}
+            items = sorted((p for p in root.glob('*') if p.is_file() and not p.name.startswith('.')),
+                           key=lambda p: p.name.lower())
+            rows = []
+            for p in items:
+                st = p.stat()
+                rows.append('<tr><td><a href="/%s">%s</a></td><td class="r">%s</td><td>%s</td></tr>' % (
+                    urllib.parse.quote(p.name), _html.escape(p.name), nice_size(st.st_size),
+                    time.strftime('%a %d %b, %I:%M %p', time.localtime(st.st_mtime)).replace(' 0', ' ')))
+            note = '<p class="%s">%s</p>' % ('bad' if bad else 'good', _html.escape(msg)) if msg else ''
+            page = FILES_PAGE % {'name': _html.escape(server_name), 'note': note, 'limit': nice_size(MAX_UPLOAD),
+                                 'rows': ''.join(rows) or '<tr><td colspan="3" class="none">No files.</td></tr>'}
+            self.send_bytes(200, page.encode('utf-8'), 'text/html; charset=utf-8')
 
     return FilesHandler
 
 
-PAGE = '''<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+FILES_PAGE = '''<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
 <html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8">
 <title>Palms Server - Files</title>
 <style type="text/css">
@@ -1061,7 +396,6 @@ body { background: #008284; margin: 0; padding: 16px; font: 13px Tahoma, "MS San
 .title { background: #08599C; color: #FFF; font-weight: bold; padding: 4px 8px; }
 .body { padding: 12px 14px; }
 h2 { font-size: 15px; color: #103473; margin: 16px 0 6px; }
-.box { background: #FFFFE7; border: 1px solid #000; padding: 8px 10px; margin: 8px 0; }
 table { width: 100%%; border-collapse: collapse; background: #FFF; border: 2px inset #FFF; }
 th { text-align: left; background: #DEDFDE; padding: 3px 6px; font-weight: normal; border-bottom: 1px solid #848284; }
 td { padding: 3px 6px; border-bottom: 1px solid #EEE; }
@@ -1073,30 +407,154 @@ td.none { color: #636163; }
 </style></head>
 <body><div class="win"><div class="title">Palms Server Files - %(name)s</div><div class="body">
 %(note)s
-<div class="box"><b>Install or update Palms LAN Center:</b> save
-<a href="/palms-update.vbs">palms-update.vbs</a> to the desktop and double-click it.
-The latest version is installed to C:\\PalmsLAN and started. Run it again to install a new version.
-<br><b>Windows 98:</b> the first time, also save <a href="/client/palmsget.exe">palmsget.exe</a> in the same folder as palms-update.vbs.</div>
-<div class="box"><b>Publish a new version (development PC):</b> after File &gt; Make PalmsLAN.exe in Visual Basic 6.0,
-upload PalmsLAN.exe with the form at the bottom of this page. PCs with 0.7.6 or later update themselves within a minute.</div>
-<div class="box"><b>Test PC cleanup:</b> <a href="/palms-clean.vbs">palms-clean.vbs</a> removes all games installed by
-Palms LAN Center, and its settings. palms-update.vbs also copies it to C:\\PalmsLAN.</div>
-
-<h2>LAN Center Files</h2>
-<table><tr><th>Name</th><th>Size</th><th>Modified</th></tr>%(client_rows)s</table>
-
-<h2>Other Files</h2>
-<table><tr><th>Name</th><th>Size</th><th>Modified</th></tr>%(other_rows)s</table>
-
+<h2>Files</h2>
+<table><tr><th>Name</th><th>Size</th><th>Modified</th></tr>%(rows)s</table>
 <h2>Upload File</h2>
 <form method="post" action="/upload" enctype="multipart/form-data">
 <table><tr><td>File:</td><td><input type="file" name="file" size="40"></td></tr>
-<tr><td></td><td><input type="submit" value="Upload"> <span class="small">Maximum file size: %(limit)s. A file with the same name is replaced.</span></td></tr>
-<tr><td></td><td class="small">PalmsLAN.exe, MSWINSCK.OCX, palmsget.exe, 7za.exe and the four .wav sounds go to LAN Center Files.
-Everything else goes to Other Files.</td></tr></table>
+<tr><td></td><td><input type="submit" value="Upload"> <span class="small">Maximum file size: %(limit)s. A file with the same name is replaced.</span></td></tr></table>
 </form>
 </div></div></body></html>
 '''
+
+
+# ---------------------------------------------------------------- the projector
+
+PROJ_GIFS = {
+    'palm': 'R0lGODlhIAAgAIMAAP/3xv/3re/ThJzb/5Tne/+2Id6iY8aiUudxEDmW5xiCIRhhtVpFGAg8CFokACkUACH5BAEAABAALAAAAAAgACAAQAj/ACEIHEiwoMGDBBsQUECgYQOFDxsqmPiwgMWLAQI4QEjwgYEHF0OKDImg5EaBAxIwAADggACXHh+8fHmAJYMEOHMmWMAT4UOOQBNKnBjzgdGJDAlUHFlSI9CYI6NaLIngJISUCQZo3apVp9evO3sGHcvxYYOBChWcFWhWaYOMGq0eNEu3bgOpFxE4ZbvQrNGPRtsiVSqSqtyCUPEyNYmQgeOYjiMzYFqA8UCskVse2Mx5c2SwYReg5Em6tOnTqMWSXc26dVCFSg02cECbNlDYdPtCiCjx7tSMtgtGHAxxIVLfUfUe5k0gMOyGbqUaRmuc6EcDH6snRU6yKtufAxNfTayb3DtC8Yq7H+6IHWR69U/bv69sGaVWxywBxMyf3zHX/1qhpJJmnBnVWWcMAIiTWFjlJNmDN4GWE4M7VbiAhRheqGGGYY2W2ocgihYQADs=',
+    'trophy': 'R0lGODlhIAAgAIMAAP/////7xt7f3v/TjP/bKf/DKd6aQqWipc6aCMaKCKVlIYxZAFpBAEowADEwMUooACH5BAEAABAALAAAAAAgACAAQAj7ACEIHEiwoMGDCBMyCICgIYOEEAs2CECxIsUGESE4ACCgY8cDBxxMLFBggckECRo8WMmyZUaCDB6+nEmzoIObOHOOJHkyZcaNIIOCFBkApVGUKgcoWMpUwYOaMWtCjEmRAAKKUaUazJpVq1epO0suQPqTo0cBQ8P2xBhx41m0IcOSRPpggIG7d5c+1Zizb4O/gAO3HLz3q+GCXQ/HXIx1sUzDCxsieHwYwkKqlCFTTly5M8HAoNl+lWtUtNedJsf6bAugtevWREmKJcv6bNDYPFWbRujW423SdAcIHy58L1C0cOMWLZCAeXAFBqAzNQ5A6O+iR5831esZYUAAOw==',
+    'crosshair': 'R0lGODlhIAAgAIIAAP+Sc+c0Ia0cEEoIAAAAAAAAAAAAAAAAACH5BAEAAAUALAAAAAAgACAAQAjnAAsIHEiwoMGDBwcAECBggEECBAwqZOiw4EQAFREinNhw40IBADAOGABxpMKPHTUOPMmwJUSUIDFq5JhRpcWPNQvQPAgxIU6bBE2WHAlU5ciQAF6GJFpUJ0qmBXoKPMpQpk+KPCNK/EkQotevWgsECDAQLNigXJtOTbvyo9WyYdcGwGqTqksCLSnmVMuXr1ACJvuuZMkQYsulez3m/WsS5durdOHerJp458O4bUHmtOx34WPOakGb/TpwLNzRcUE3VX0xsdTJKSc/Fvg6c+ytlDO+Pjr3tuKqIZXCTGyUo2G9gpMrFxwQADs=',
+    'rocket': 'R0lGODlhIAAgAIMAAP//////5/f3///3pbXb/+fTc//bKbW6xnuq53uClBA0cyEkKQAAAAAAAAAAAAAAACH5BAEAAAwALAAAAAAgACAAQAj3ABkIHEiwoMGDCA0qAECgoUMEEBUkHLhAQIIEBgxcvJgxwQGPHTeGTLAgYYABKFOqVFmgQICJMGMmXFBRgM0DOHPq1GnTJs2YJ1eydCmTQYACA5AqTcp0qVKiRaNKFahgIYCrV6tOpUizq1evEyt+3Em2bE6PCQSUNPiVpsWNJNsWDSp0JVSgdfOivHvwaMu/gAML5ru1sGHDVRNLPMzAqkOHWQsvRECAsuXKCAAsjum1p+fPPruyrWm29M7QAiuKNDAWI+ucGVuPJEmw61u4uHNfFA00QIC2vl9upZu35VTixY3P1StUOUzkzJM6R+h3sHXAjKMGBAA7',
+    'flag': 'R0lGODlhIAAgAIMAAP/7xpTne97f3s6aCDG2OWtpaxiCIVpBAAg8CCEgIQAAAAAAAAAAAAAAAAAAAAAAACH5BAEAAAoALAAAAAAgACAAQAjgABUIPEDwgMCDCBMqXKgggYACCRAEIECxosWLFA0YQKDQIUSJGAlo1IigpEmJHBN6TMCwpcuGDyOmTFhyIkaSHWOCDMlT5MacEA+enPkSKMuiSAcCGGDwZc0AUAOUXLhSYtSrPX0SFVjVZtaLOFXq9HrT58iRW2F+DHD2bNqXK5MmjSu3aIK7R+u6PACgb1OnJ1smIJiXoVWLBqCm7Tr0aUi0Rnd+rQhZ7NrJiMMi7IqZsuaDnL8aEGl28ViebVObXju6dem3Uy2zrOn2LdyYem8HzS0YN2+GdH8bFU48aUAAOw==',
+    'castle': 'R0lGODlhIAAgAIMAAP///8bDxpyanISChOc0IVJRUkJBQikoKSEgIQAAAAAAAAAAAAAAAAAAAAAAAAAAACH5BAEAAAoALAAAAAAgACAAQAj/ABUIHEiwoMGDBhEAAIBA4QAEBA0YSLiwIYCHBBUGSJBgwEMAAUKKFOlRI8eSGUEG8PgxZAIBBQ4cSLCyZU2MAxtCVKAzogECQIP25Nkw5caOOHkurJgT5MmkSkOy1LhRgFUBNEuqnJqSpVaPL2XOnHrR606EBiWiRatwZ1ufBAq+VXo26s26auVuRdn0aEmdexkC9guVKtmRiLVK5SvQsOKqMWfWdFx4r82XkbPa5JpTp2edHEMn+Ex6renTqAVKDJqabmOGcIE2dQt79mu8E/XSrqtxIWMFeY36rkwyKQKJQ+1ONvr0rEPGJpHydip9KeIAS6P/pjpZ5fXDi6cXN+cu+q737ecvCxCL1ObyvuFVhpXZnjv68fLX0wf//vXK7gNUxd5hAaLn1Udg6TfWV2a15uBAAQEAOw==',
+    'planet': 'R0lGODlhIAAgAIIAAP/7xt6m/86aCJxF3lpBAGMklCEIOQAAACH5BAEAAAcALAAAAAAgACAAQAjJAA8IHEiwoMGDCAsaMBAgwICHDws0XJjQIEOIGDNGLEAAgAACFRUyLECSJMWQKFOmvKhRo8mOBGKCPABz5sUCD2V2BBBzgEmVQIMKHUpwoVEDRAWybOnz5cyKS5lCLGlg51OBO0dKHSATAE+kB3d6HctTJ86SP5OqXcu2rdu3Qhc2nBvgZNyGWycCjcqUZN2yMRHy3Sqxqs6Dg6WS7PgxLIHELWOWDesRJGTJgMEa1Mm5q1eZZwtoRtg5ZgC0qO0SPaoaruvXagMCADs=',
+    'tank': 'R0lGODlhIAAgAIIAAK3Dc5yanGuGMUJVGFJRUikoKRggCAAAACH5BAEAAAgALAAAAAAgACAAQAjWABEIHEiwoMGDCBMqXEjQgMOHECNGPHggAIEAGC1m1JjxYseNBQocYEiy5EADAAAIWMkyJcqUMGEaaAhggM2bOHPqHABgZsEDQIMKHUp0qMmjSJOSlKj0ZM2dNnuWRDlAQNWrVrNivcrTJ8GKG8OKHZtxpMCKITGGLKA2bYC1bdm+DWm2qd27ePPq3ct36cuYEgMnRKlVq83AEAc/hTrAK8O/MSNLdqmYseXDBhFr3uy1IgGPn0F/xhia9Oi5Acyi3ehRLWuQIEUORLu2tu3bt+v23W0wIAA7',
+    'sword': 'R0lGODlhIAAgAIMAAP/////7xt7f3qWipd6iY86aCGs8EFpBADEwMSkUAAAAAAAAAAAAAAAAAAAAAAAAACH5BAEAAAoALAAAAAAgACAAQAi0ABUIHEiwoMGDCBMeRABAgIABAxAoXNjwYcSJBxMQMHAgQIECAQ5gHElyIIKTACSWNFkRosqJHT+GdOhypcCOIRMYPMDTps+JL38KZAjxolAFDGka/ZnUYlCFOEMObbnUZ0yQB57a1GjAgE4FV0Xa7NjzqNmzTLUKZQggJVqkVNWubFrTLN2qTOOevSv3IM+yU5X2RXg1JN+jhQ/UNZsg8VmuXh2P5dn1602PYkuGfUswM+eAADs=',
+    'bomb': 'R0lGODlhIAAgAIMAAP/bKZyanP+Sc6VpMec0Ia0cECkoKUoIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACH5BAEAAAkALAAAAAAgACAAQAjcABMIHEiwoMGDCBMKHDBAocIDAggUmHgA4sQCFSNKxOgwAcSNGC1S/LjxQMeTCwcAWMkyIUQBMAVkjDmTpkMEOHPq3MkTgUORIwVczHiRI8qjCVYiNciwIUGlS1NGHfhxKNCMBEreDMC1q9evX30+jGhVaNCsFDtWDVoWrdGHFePKnTt3akeodg2ybGm3KUOBeKP+zYvQ6VS6cQcgjqtW49nHaX86DkmWMkiTCntq7pk5gIHPoEOLDi3W5WSskN+adova8tDGrNe2Vo3QYknZa2kfBEq5bFHMhI8GBAA7',
+    'pizza': 'R0lGODlhIAAgAIMAAP/7xv/bKf/TjN6aQs6aCP+Sc6VlIVpBAEooAK0cEEoIAAAAAAAAAAAAAAAAAAAAACH5BAEAAAsALAAAAAAgACAAQAjhABcIHEiwoMGDCBEIMMCwocOHEBEgLHgAQICLGC8q2HhgoseBFQMQINDxI0GFAlKqXMmyZUqJEysqKECzgAKMGzeOLGmSYMiZNnf27HmA59CjSAUqHGCAqdOmUJ9KZQjzYMiMWDOOJDn0wMwEYG9qLBDWaFeLWLeaTSqTrAKuSRFWhBu3rt27CPLq3cu3r9+CSwcIHky4MOGGVQcqhMi4MdWDfiNL9ng1p9isIulSBvA1LM6ab9fG5JwzY2cFojcTwKy27tUAGy8KtTv361vNrknrTM0WQOu7FH3zpj0c+NGAADs=',
+    'burger': 'R0lGODlhIAAgAIMAAP///8b3jP/TnN6iY+eiSv+Sc7VtITGGGFJRUms8EBA8COc0Ia0cEEooCEoIACkUACH5BAEAABAALAAAAAAgACAAQAj/ACEIHEiwoMGCCBAcXGjQQYEFECMuYEDRAcEGAgwQ0Mhxo0cDBgQ0kAixIsEHDwYkWMmyZUuUD0iaZMgQAYCbOHPiVFiwAUYBQIOKhOCQZMmZEBQoXRqgqdMAS6PKZGDxos+MILNq9dnAgdevX2mKPWiT59iFDguoXcu26lmCRY1SpNpTAIG7ePMSANrg4VS6AjFqHUw45EiJSCGgjMq4MUq5gAMD7Uj5Y0iRczO7fcu589iyngcmHE26tNm3plMnDB0X8mbOrae+tsqVq8DYiCMP/Kl3o+G+Ro9uxthbb1bgrndjLVz4cMS5w2tLn147d2SmTg9o337g6VLrblMOJVDpsvzK8TGfJ4bQAKb79zB9TpwP/eJy5oN9Zq5/kHrt0ACKFRAAOw==',
+    'moon': 'R0lGODlhIAAgAIIAAP///+/v796iY5yanFJRUms8ECkUAAAAACH5BAEAAAcALAAAAAAgACAAQAjjAA8IHEhwAMEDAwweXMiwYEKHDSMKJACgosWLGAEECEARAAECDTtmHKmR40eJBxMqFPgQ5UIDAmIWmEmz5syYAgy4FEkS40aQBygCXUhxo9GjSDm6XNiSZdOlTFcifAr1oIGrWLNerRr0olatFX/u7DlSbNehBHmSDWtSaMiwGnsGKIkW6se7d7lGlUpV78CnfbmqhOiXsFOphac6RAwVK87HkLEuJZBVgM2aWesyVEvWaN6InOX+/Ojx7VqLnieWJnoatVm3rFuX5Fjx5GbZszWzRhp3ru+jujffnQ38c+LCAQEAOw==',
+    'star': 'R0lGODlhIAAgAIIAAP///+/v79bT1oSChFJRUuc0ITk4OQAAACH5BAEAAAcALAAAAAAgACAAQAjuAA8IHEiwoMGDCA0AAEAAQICHDQEMmEixogABBhICKMDxIccCEiuKvJjxoEKGDiEuFDkSo8aFMGPKjHnRpcmZCz/iBFCzpMGTOUHupElSY82jSJP2TGigqdOnUKM2fUmgqtWhC5feZGi1alCcWn9uLNBV586wBU8S+EgWK8+iW7t6xYqWoEIBchsK4Ml3r1+4CAMLHky48Fa3Q32mRXzWpliUMCPSdbwY5cMAkocCrozT7MzNdnd6/kw5tNnRYEsPPMmWI2LQq2GyZQxbIFDGRBWHhrwwc2PdsS2rdFv7wF2lyJECty21eXPD0A8GBAA7',
+    'door': 'R0lGODlhIAAgAIQAAP/75//7xv/ztefPc96iY86aCJyanJTnezG2OaVpMWs8EBiCIVJRUgg8CCkoKSkUAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACH5BAEAABEALAAAAAAgACAAQAj/ACMIHEiwoMGDByEYYPCAQIIECiI+EEBRwIABDhxAQEhQIUOHECVWtIhRo8AGDRB6bPgwooKJFS9m3BihwYGUBlcC2MmzJ8+ZHAeuBOkSJkWZJoNGGNpSZEWbB6JGRUB1wc2OBhw0dClxgEWSQJUqNEC2rNmzZGkGHUqAwIO3I8EmXbuQZciXI5Gq5cj0rlG5e1XWBRmgQIC/ek9GxYn1Y1O8Tw8smEyZMmOBfYvmLUnzckEIoN+KFn2x9ADQgROiXs26deqcCxnInk17dsa5fOuKjns0sdjBD9u6jembruOmRkuHNW43ZPLiuY87J85Z6VLgyKmH9dy4eQDIJKvXPbwKW3rh5CjTozyAwKrnvtOP2qw8uf3ky/CdWlSfXvIC7vmBp1xSKAmmlUMKxBfedrkdyNVLpkFn3YTWBQQAOw==',
+    'megaphone': 'R0lGODlhIAAgAIIAAP/7xv/bKf+Sc86aCFpBAOc0Ia0cEAAAACH5BAEAAAcALAAAAAAgACAAQAjWAA8IHEiwoMGDBgkACMCwoUMBBQwYcOhwgEUCBBVS3Mix4kWECi1+REgy48KOKBsOAIDRZEqIEjuKbDkw5ACOInPqHJmQZsmfPQkIHUq0aNGDGlHCnIiT54GkHZfKdAqVowCJTDfONHkzKtapA3zWPBng5kyjR0naFAu0rdu3cN8qBEC3rt27eNlW3SigrwCUK33upXg15lTBZK1+PexS6eKmiF8+1hq2ccrLVBPz9Qu48liLXmOaLUvaqcCQlHfuZOsyp9C4CQFcZA1b4WvYIGnj3v0zIAA7',
+    'joystick': 'R0lGODlhIAAgAIMAAP/////7xpyanM6aCP+Sc4SChFJRUuc0IVpBAK0cEEoIACkoKSEgIQAAAAAAAAAAACH5BAEAAA4ALAAAAAAgACAAQAj2AB0IHEiwoMGDCA0qIHCgocMEEBUknFiQAYACDCgWbCBgIcQECgyIbECypEgDCAIMWIlAQAONDhQsZJiAAAGZMCd6/Agy50aSAoIKsIhRqEuSMIEuWMq0qVOkPgvijIpwocOHNSVSFejxQAKvXiNuNUg041iEZbc2kCnzJFChJE8imIvgpUGOTQ0s0Huy796/TO3mLFnyrGGqMm1OPWwV603Dja+G1bo18lWxZ3fy7Hk4JtvFnR2kDT1w9GHCZQn7fCugL+G+cAVvnKl4pICmLkWmDMC77sbbn/uKZMBAOEq6S2ULVOr0L9/mC6BOJIy3KXXSPgMCADs=',
+    'calendar': 'R0lGODlhIAAgAIMAAP///9bT1qXL/5yanDl15xhFrec0ITk4OSEgIQgcSgAAAAAAAAAAAAAAAAAAAAAAACH5BAEAAAoALAAAAAAgACAAQAj/ABUIHEiwoMGDBhMIKECAocOGEB9KbFigQAKCBwAAGMBR48aOGjkO8CgygMkDGD2qXMlypckAKA8iQEBwZk2aA20ezNiyZ8uXMQXyFEkSpIGjR0NyBJrypdOnUKMGLahTYFUFV68SVChAwMyuXb+CFRsWAdiLAxVWXMu2rdu2aIUqHTm3KN2PA5gO5Omzr0a9cv0CQJpUJWAFQ0HitWv38IHHkCNLnkwZYVacVjFj1WxZ8+WbCBOITjBzNGkEpkuPVi16qwACBGbChi17dm3aCCjGVaD2re/fu00LH058eErBfk8eJ1q3+WLle5Enh7lcMXPCBupCD8x88WDC2qlHI5fuczti593TdzTPMwAA9/Dfy49P/714uVHz67+PsL9/ggEBADs=',
+    'disc': 'R0lGODlhIAAgAIMAAP/////7xv/bKcbDxv+Sc86aCISChOc0IVJRUq0cEEoIACEgIQAAAAAAAAAAAAAAACH5BAEAAAwALAAAAAAgACAAQAj/ABkIHEiwoMGDBxcAGMCwocOHEA0YWGBQIUMFBA4cCCCgo8cCBQIcSJBAwQCJFAtaHKCgpcuXMF2enFhxpYGGNxnmPInTAIAFKQmuxEigqNGjSE2irLiQZUaNAUBKBamRpFKaKgFI3Iqgq9evXbduDaoSqNmzaNOSFdqUp06ccN8uzQqxrt25bC8+hRqgb1+NI0vOXMtg6NOoHjtKDXyVsGGSkCNLFox34Eq7mHViFaq2s2fCCEOLTghAa2nTpX2mPu0TdOG2O2PHndma6WzZbzVXFng5c92xtlnGHP4SOF2ngJMrh6zAeF7kUBODFMncueWmGKMnVlyg+u7XeqGCNxRQgDz57lat88ZOIMHIjVO7By6pHrzTyfjTf+/t+2F9hTcFCNaACPD0n1ZiJajggq6N5iBBAQEAOw==',
+    'clock': 'R0lGODlhIAAgAIIAAP///9bT1qXL/4SChOc0IRhFrQgcSgAAACH5BAEAAAgALAAAAAAgACAAQAjyABEIHEiwoMGDBw0IMACgocOGBw48fKjQgMGKEzMCiBgxY0WEChcaCKCxoQGFBSwiJBgyJcOJJwXIVJlwYUmIEm9+ZDnzpk4BKVdePEn0pNCjCGLKXDqTJlKULx8OGOBxJkibJTtqDLBzIEYAUzMSIJAxLICuSXv6dMjRIdSLaieahQnUKciQIovKdIm0r9++RYv+LajUpd6mfqFG1ajULuG6GrXSXVgzZdacVSnztHz5p2aBXzuX5Po57cu5DsdKBkuVtNPQPjliBuD68eK1dB2bxj2x9lWsUqk+JB30KN6TtJNzbalbqFKmdZsPnk59cEAAOw==',
+}
+
+PROJ_SLIDES = ('now', 'sched', 'cup', 'vote')
+VOTE_SHOW_MINUTES = 10       # a closed vote stays on the projector this long
+CUP_SHOW_MINUTES = 60        # and a finished tournament this long
+PROJ_BG = '#0B1416'
+
+PROJ_PAGE = '''<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>%(name)s - Projector</title>
+<style type="text/css">
+body { margin: 0; background: #0B1416; overflow: hidden; }
+iframe { position: absolute; left: 0; top: 0; border: 0; }
+</style>
+<script type="text/javascript">
+var n = 0, cur = 0, secs = 15;
+function fr(i) { return document.getElementById('f' + i); }
+function next() {
+  var w = document.body.clientWidth, h = document.body.clientHeight, f = fr(1 - cur);
+  f.style.width = w + 'px';
+  f.style.height = h + 'px';
+  f.src = '/slide?n=' + n + '&w=' + w + '&h=' + h + '&t=' + new Date().getTime();
+  n++;
+  setTimeout('show(' + (1 - cur) + ')', 1500);
+}
+function show(i) {
+  fr(i).style.visibility = 'visible';
+  fr(1 - i).style.visibility = 'hidden';
+  cur = i;
+  setTimeout('next()', secs * 1000 - 1500);
+}
+</script></head>
+<body onload="next()" scroll="no">
+<iframe id="f0" frameborder="0" scrolling="no" style="visibility: hidden" src="about:blank"></iframe>
+<iframe id="f1" frameborder="0" scrolling="no" style="visibility: hidden" src="about:blank"></iframe>
+<noscript><p style="color: #FFFFFF; font: 20px Arial">The projector needs JavaScript. In Internet Explorer: Tools &gt; Internet Options &gt; Security &gt; Custom Level &gt; Active scripting &gt; Enable.</p></noscript>
+</body></html>
+'''
+
+
+def make_projector_handler(srv):
+
+    class ProjectorHandler(QuietHandler):
+        server_version = 'PalmsProjector/' + VERSION
+
+        def do_GET(self):
+            path, _, query = self.path.partition('?')
+            q = urllib.parse.parse_qs(query)
+            if path in ('/', '/index.html'):
+                page = PROJ_PAGE % {'name': _html.escape(srv.name)}
+                return self.send_bytes(200, page.encode('cp1252', 'replace'), 'text/html; charset=windows-1252')
+            if path == '/slide':
+                def num(k, d):
+                    try:
+                        return int(q.get(k, [d])[0])
+                    except ValueError:
+                        return d
+                try:
+                    page = srv.projector_slide(num('n', 0), num('w', 800), num('h', 600))
+                except Exception as e:
+                    log('Projector: unable to make a slide (%s).' % e)
+                    page = slide_page(srv, 1.0, 'clock', 'PALMS ARCADE', '', '<br>', '')
+                return self.send_bytes(200, page.encode('cp1252', 'replace'), 'text/html; charset=windows-1252')
+            if path.startswith('/gif/') and path.endswith('.gif'):
+                b = PROJ_GIFS.get(path[5:-4])
+                if b:
+                    return self.send_bytes(200, base64.b64decode(b), 'image/gif', cache=True)
+            self.send_bytes(404, b'Not found.', 'text/plain')
+
+    return ProjectorHandler
+
+
+def pesc(s):
+    """HTML-safe text for Internet Explorer 5 (no &#x27;)."""
+    return _html.escape(str(s), quote=False).replace('"', '&quot;')
+
+
+def px(s, n):
+    return max(1, int(round(n * s)))
+
+
+def slide_page(srv, s, icon, title, right, body, foot):
+    """One slide: a header bar with the palm, a title and the time, the body, and a line at the bottom."""
+    e = pesc
+    return ('<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">\n<html><head>'
+            '<meta http-equiv="Content-Type" content="text/html; charset=windows-1252"><title>%(title)s</title>'
+            '<style type="text/css">\n'
+            'body { margin: 0; background: %(bg)s; color: #FFFFFF; font-family: Arial, Helvetica, sans-serif; }\n'
+            'td { font-family: Arial, Helvetica, sans-serif; color: #FFFFFF; }\n'
+            '.hd { background: #31616B; }\n'
+            '.t { font: bold %(t)dpx Arial, Helvetica, sans-serif; color: #FFFFFF; letter-spacing: 1px; }\n'
+            '.r { font: bold %(r)dpx Arial, Helvetica, sans-serif; color: #BFD6DA; }\n'
+            '.big { font: bold %(big)dpx Arial, Helvetica, sans-serif; color: #FFDB29; }\n'
+            '.mid { font: bold %(mid)dpx Arial, Helvetica, sans-serif; color: #FFFFFF; }\n'
+            '.txt { font: %(txt)dpx Arial, Helvetica, sans-serif; color: #FFFFFF; }\n'
+            '.lbl { font: bold %(lbl)dpx Arial, Helvetica, sans-serif; color: #8CAAB5; letter-spacing: 2px; }\n'
+            '.addr { font: bold %(addr)dpx "Courier New", Courier, monospace; color: #FFFFFF; }\n'
+            '.dim { color: #6B8A92; }\n'
+            '.now { color: #FFDB29; }\n'
+            '.ft { font: bold %(ft)dpx Arial, Helvetica, sans-serif; color: #BFD6DA; }\n'
+            '</style><script type="text/javascript">try { parent.secs = %(secs)d; } catch (x) { }</script></head>'
+            '<body scroll="no"><table width="100%%" cellspacing="0" cellpadding="0" class="hd"><tr>'
+            '<td width="%(hw)d" align="center"><img src="/gif/palm.gif" width="%(pal)d" height="%(pal)d" alt=""></td>'
+            '<td width="%(iw)d"><img src="/gif/%(icon)s.gif" width="%(ic)d" height="%(ic)d" alt=""></td>'
+            '<td class="t" height="%(hh)d">%(title)s</td><td class="r" align="right">%(right)s&nbsp;&nbsp;</td></tr></table>'
+            '<table width="100%%" cellspacing="0" cellpadding="0"><tr><td bgcolor="#F78E21" height="%(st)d"></td></tr></table>'
+            '<table width="100%%" height="%(bh)d" cellspacing="0" cellpadding="%(pad)d"><tr><td valign="top">%(body)s</td></tr></table>'
+            '<table width="100%%" cellspacing="0" cellpadding="%(pad)d"><tr><td class="ft">%(foot)s</td></tr></table>'
+            '</body></html>') % {
+        'bg': PROJ_BG, 'title': e(title), 'right': e(right), 'body': body, 'foot': foot, 'icon': icon,
+        't': px(s, 34), 'r': px(s, 24), 'big': px(s, 44), 'mid': px(s, 30), 'txt': px(s, 24), 'lbl': px(s, 16),
+        'addr': px(s, 40), 'ft': px(s, 22), 'secs': srv.proj['seconds'], 'hh': px(s, 64), 'hw': px(s, 76),
+        'pal': px(s, 48), 'iw': px(s, 44), 'ic': px(s, 32), 'st': px(s, 4), 'pad': px(s, 14),
+        'bh': px(s, 600) - px(s, 64) - px(s, 4) - px(s, 22) - 3 * px(s, 14)}
 
 
 # ---------------------------------------------------------------- server
@@ -1147,10 +605,7 @@ class PalmsServer:
         self.admin_password = cfg['admin_password']
         self.clients = set()
         self.history = collections.deque(maxlen=HISTORY_LINES)
-        self.file_page = False    # the file page is running, so LAN Centers can update from it
-        self.client_ver = ''      # the version of files/client/PalmsLAN.exe
-        self._client_stat = None
-        self._announced = ''
+        self.loop = None
         self.updating = {}        # nick (lower case) -> when they closed to install an update
         DATA_DIR.mkdir(exist_ok=True)
         self.pcs = self._load_pcs()
@@ -1160,6 +615,7 @@ class PalmsServer:
         self.suggest = []         # games suggested for the next vote: {'name', 'by': [nick, ...]}
         self.food = self._load_food()
         self.cups = self._load_cups()
+        self.proj = self._load_proj()
         self.arrived = {}         # nick (lower case) -> when they first signed in today
         self.gone = {}            # nick (lower case) -> who left, when and why (for Who's Here)
         self.maps, self.map_active = self._load_maps()
@@ -1206,6 +662,9 @@ class PalmsServer:
         for e in events:
             ins = e.get('in', [])
             c.send('SCHEDINFO', e['id'], len(ins), ','.join(ins), e.get('note', ''))
+        for e in events:
+            if e.get('game') or e.get('server') or e.get('connect'):
+                c.send('SCHEDGAME', e['id'], e.get('game', ''), e.get('server', ''), e.get('connect', ''))
         c.send('SCHEDEND', len(events))
 
     def schedule_changed(self):
@@ -1431,6 +890,10 @@ class PalmsServer:
         if t['state'] in ('running', 'done'):
             t['champion'] = champ or ''
             t['state'] = 'done' if champ else 'running'
+            if champ:
+                t.setdefault('done_at', time.time())
+            else:
+                t.pop('done_at', None)
         return rounds
 
     @staticmethod
@@ -1734,6 +1197,7 @@ class PalmsServer:
             v['task'].cancel()
             v['task'] = None
         v['state'] = 'closed'
+        v['closed_at'] = time.time()
         counts = self.vote_counts()
         total = sum(counts)
         best = max(counts) if counts else 0
@@ -1857,7 +1321,7 @@ class PalmsServer:
         trouble = None
         while True:
             try:
-                text = await asyncio.to_thread(fetch_text, url + 'catalog.txt')
+                text = await asyncio.get_running_loop().run_in_executor(None, fetch_text, url + 'catalog.txt')
                 lines = [l.strip() for l in text.splitlines() if l.strip()]
                 if not lines or not lines[0].startswith('PAKS|'):
                     raise ValueError('invalid catalog format')
@@ -2081,7 +1545,6 @@ class PalmsServer:
                 c.send('KNOWN', known.get('nick', ''), known.get('seat', ''))
             else:
                 c.send('NEWPC')
-            self.offer_update(c)
             return None
         if cmd == 'LOGIN':
             return self.login(c, arg(1), arg(2).upper())
@@ -2325,6 +1788,43 @@ class PalmsServer:
         if cmd == 'TPLAPPLY':
             self.apply_template(c, 'add' if arg(1).lower() == 'add' else 'replace', self.template_lines(arg(2, rest=True)))
             return None
+        if cmd == 'PROJ':
+            self.send_proj(c)
+            return None
+        if cmd == 'PROJSET':
+            if not c.admin:
+                c.send('ERR', 'NOT_ADMIN', 'Host mode is required to change the projector. Use HOST|password first.')
+                return None
+            try:
+                secs = int(arg(1))
+            except ValueError:
+                secs = 0
+            if not 5 <= secs <= 300:
+                c.send('ERR', 'BAD_SECONDS', 'Each slide can show for 5 to 300 seconds.')
+                return None
+            self.proj = {'seconds': secs, 'slides': [x for x in PROJ_SLIDES if x in arg(2).lower().split(',')]}
+            self.proj_changed()
+            log('%s changed the projector: %d seconds, %s' % (c.nick, secs, ','.join(self.proj['slides']) or 'no slides'))
+            return None
+        if cmd == 'SCHEDGAME':
+            if not c.admin:
+                c.send('ERR', 'NOT_ADMIN', 'Host mode is required to change What\'s On. Use HOST|password first.')
+                return None
+            e = next((e for e in self.schedule if str(e['id']) == arg(1)), None)
+            if not e:
+                c.send('ERR', 'NOT_FOUND', 'Event %s not found. Type SCHED to list events.' % clean(arg(1), 10))
+                return None
+            game = arg(2).strip().lower()
+            if not re.match(r'^[a-z0-9-]{1,24}(/[a-z0-9-]{1,24})?$', game):
+                game = ''
+            for k, v in (('game', game), ('server', clean(arg(3), 40).replace('|', '/')),
+                         ('connect', clean(arg(4, rest=True), 120).replace('|', '/'))):
+                if v:
+                    e[k] = v
+                else:
+                    e.pop(k, None)
+            self.schedule_changed()
+            return None
         if cmd in ('SCHEDADD', 'SCHEDDEL', 'SCHEDNOTE', 'VOTESTART', 'VOTESTOP', 'SUGGDEL',
                    'FOODOPEN', 'FOODCLOSE', 'FOODCLEAR') and not c.admin:
             c.send('ERR', 'NOT_ADMIN', 'Host mode is required to change What\'s On. Use HOST|password first.')
@@ -2481,6 +1981,7 @@ class PalmsServer:
         self.send_suggestions(c)
         self.send_food(c)
         self.send_map(c)
+        self.send_proj(c)
         if seat_note:
             c.send('ERR', *seat_note)
         if time.time() - self.updating.pop(nick.lower(), 0) < 300:
@@ -2494,44 +1995,254 @@ class PalmsServer:
         return None
 
     # ----- every few seconds, ask each LAN Center that can answer how long a round trip takes
-    def published_client(self):
-        """The version of the LAN Center on the file page, read again whenever the file changes."""
-        p = FILES_DIR / 'client' / 'PalmsLAN.exe'
+    # ----- the projector: its settings, and the slides (made for the web page on projector_port)
+    def _load_proj(self):
+        p = {'seconds': 15, 'slides': list(PROJ_SLIDES)}
         try:
-            st = p.stat()
-            key = (st.st_mtime, st.st_size)
-        except OSError:
-            key = None
-        if key != self._client_stat:
-            self._client_stat = key
-            self.client_ver = exe_version(p) if key else ''
-            if self.client_ver:
-                log('Palms LAN Center %s is on the file page. Older versions update themselves.' % self.client_ver)
-        return self.client_ver
+            d = json.loads(PROJ_FILE.read_text(encoding='utf-8'))
+            if 5 <= int(d.get('seconds', 15)) <= 300:
+                p['seconds'] = int(d['seconds'])
+            p['slides'] = [x for x in d.get('slides', []) if x in PROJ_SLIDES]
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log('Could not read %s (%s). Using the standard projector settings.' % (PROJ_FILE, e))
+        return p
 
-    def offer_update(self, c):
-        """Tell a LAN Center that's older than the one on the file page, and where to get it."""
-        if not self.file_page or not c.ver:
-            return
-        ver = self.published_client()
-        if not ver or ver_tuple(ver) <= ver_tuple(c.ver):
+    def send_proj(self, c):
+        c.send('PROJINFO', self.proj['seconds'], ','.join(self.proj['slides']), self.cfg.get('projector_port', '8080'))
+
+    def proj_changed(self):
+        tmp = PROJ_FILE.with_suffix('.tmp')
+        tmp.write_text(json.dumps(self.proj, indent=1), encoding='utf-8')
+        os.replace(tmp, PROJ_FILE)
+        for c in self.signed_in_clients():
+            self.send_proj(c)
+
+    def catalog_game(self, key):
+        """A game from the Cartridge Server's list, by its key (pak/game): name, icon and screenshot addresses."""
+        pak_id, _, game_id = key.partition('/')
+        out = None
+        for line in self.paks:
+            f = line.split('|')
+            if f[0] == 'PAK' and len(f) > 2 and f[1] == pak_id:
+                out = {'name': f[2], 'ver': f[3] if len(f) > 3 else '',
+                       'icon': f[18] if len(f) > 18 else '', 'shot': f[21] if len(f) > 21 else ''}
+            elif out and f[0] == 'GAME' and len(f) > 3 and f[1] == pak_id and f[2] == game_id:
+                out['name'] = f[3]
+                if len(f) > 10 and f[10]:
+                    out['icon'] = f[10]
+        if out:
+            for k in ('icon', 'shot'):
+                v = out[k]
+                if v and not v.startswith('http'):
+                    v = self.paks_base + v
+                out[k] = v
+            if out['icon'].lower().endswith('.bmp'):
+                out['icon'] = out['icon'][:-4] + '.gif'
+        return out
+
+    def proj_events(self):
+        """Today's events in order, the one on now (the last one started) and the next one."""
+        events = sorted(self.schedule, key=lambda e: (party_minutes(e['time']), e['id']))
+        mins = party_minutes(now_hm())
+        cur = None
+        for e in events:
+            if party_minutes(e['time']) <= mins:
+                cur = e
+        nxt = next((e for e in events if party_minutes(e['time']) > mins), None)
+        return events, cur, nxt
+
+    def proj_list(self):
+        """The slides there's something to show on, in order."""
+        on = self.proj['slides']
+        out = []
+        events, cur, nxt = self.proj_events()
+        if 'now' in on and (cur or nxt):
+            out.append(('now', None))
+        if 'sched' in on and events:
+            out.append(('sched', None))
+        if 'cup' in on:
+            for t in self.cups:
+                if t['state'] in ('signup', 'drawn', 'running'):
+                    out.append(('cup', t))
+                elif t['state'] == 'done' and time.time() - t.get('done_at', 0) < CUP_SHOW_MINUTES * 60:
+                    out.append(('cup', t))
+        v = self.vote
+        if 'vote' in on and v:
+            if v['state'] == 'open' or time.time() - v.get('closed_at', 0) < VOTE_SHOW_MINUTES * 60:
+                out.append(('vote', None))
+        return out
+
+    def projector_slide(self, n, w, h):
+        w, h = max(320, min(w, 4096)), max(240, min(h, 4096))
+        s = min(w / 800.0, h / 600.0)
+        slides = self.proj_list()
+        clock = ampm(now_hm())
+        if not slides:
+            body = ('<table width="100%%" height="%d"><tr><td align="center" valign="middle">'
+                    '<img src="/gif/palm.gif" width="%d" height="%d" alt=""><br><br>'
+                    '<span class="big">%s</span><br><span class="txt dim">Palms Arcade LAN Party</span></td></tr></table>'
+                    % (px(s, 380), px(s, 128), px(s, 128), pesc(self.name)))
+            return slide_page(self, s, 'palm', 'WELCOME', clock, body, '')
+        kind, arg = slides[n % len(slides)]
+        return getattr(self, 'slide_' + kind)(s, clock, arg)
+
+    def up_next(self, nxt):
+        if not nxt:
+            return ''
+        return 'UP NEXT: %s &nbsp;%s' % (ampm(nxt['time']), pesc(nxt['name']))
+
+    def slide_now(self, s, clock, arg):
+        e = pesc
+        events, cur, nxt = self.proj_events()
+        ev, title = (cur, 'NOW PLAYING') if cur else (nxt, 'COMING UP')
+        game = self.catalog_game(ev.get('game', '')) if ev.get('game') else None
+        icon_img = ''
+        if game and game['icon']:
+            icon_img = '<img src="%s" width="%d" height="%d" alt="" align="absmiddle">&nbsp;' % (e(game['icon']), px(s, 64), px(s, 64))
+        else:
+            icon_img = '<img src="/gif/%s.gif" width="%d" height="%d" alt="" align="absmiddle">&nbsp;' % (ev['icon'], px(s, 64), px(s, 64))
+        rows = ['<span class="big">%s%s</span>' % (icon_img, e(game['name'] if game else ev['name']))]
+        if game and game['name'] != ev['name']:
+            rows.append('<span class="mid">%s</span>' % e(ev['name']))
+        rows.append('<span class="txt dim">%s %s</span>' % ('Started' if cur else 'Starts', ampm(ev['time'])))
+        if ev.get('server'):
+            rows.append('<br><span class="lbl">SERVER</span><br><span class="addr">%s</span>' % e(ev['server']))
+        if ev.get('connect'):
+            rows.append('<br><span class="lbl">HOW TO CONNECT</span><br><span class="txt">%s</span>' % e(ev['connect']))
+        elif ev.get('note') and not ev.get('server'):
+            rows.append('<br><span class="txt">%s</span>' % '<br>'.join(e(x) for x in ev['note'].split('~')[:4]))
+        left = '<br>'.join(rows)
+        shot = ''
+        if game and game['shot']:
+            shot = ('<td width="%d" valign="top" align="right"><table cellspacing="0" cellpadding="%d" bgcolor="#F78E21"><tr><td>'
+                    '<img src="%s" width="%d" height="%d" alt=""></td></tr></table></td>'
+                    % (px(s, 336), px(s, 3), e(game['shot']), px(s, 320), px(s, 240)))
+        body = '<table width="100%%" cellspacing="0" cellpadding="0"><tr><td valign="top">%s</td>%s</tr></table>' % (left, shot)
+        return slide_page(self, s, 'joystick', title, clock, body, self.up_next(nxt if cur else None))
+
+    def slide_sched(self, s, clock, arg):
+        e = pesc
+        events, cur, nxt = self.proj_events()
+        start = 0
+        if cur:
+            start = max(0, events.index(cur) - 1)
+        start = max(0, min(start, len(events) - 7))
+        rows = []
+        for ev in events[start:start + 7]:
+            cls = 'now' if ev is cur else ('dim' if cur and party_minutes(ev['time']) < party_minutes(cur['time']) else '')
+            extra = ''
+            if ev.get('server'):
+                extra = ' <span class="txt dim">%s</span>' % e(ev['server'])
+            rows.append('<tr><td class="mid %s" align="right" nowrap width="%d">%s</td>'
+                        '<td width="%d" align="center"><img src="/gif/%s.gif" width="%d" height="%d" alt=""></td>'
+                        '<td class="mid %s">%s%s%s</td></tr>'
+                        % (cls, px(s, 170), ampm(ev['time']), px(s, 56), ev['icon'], px(s, 40), px(s, 40), cls,
+                           '&raquo; ' if ev is cur else '', e(ev['name']), extra))
+        body = '<table width="100%%" cellspacing="0" cellpadding="%d">%s</table>' % (px(s, 8), ''.join(rows))
+        more = len(events) - (start + 7)
+        foot = '%d more later today' % more if more > 0 else ''
+        return slide_page(self, s, 'calendar', "TODAY'S SCHEDULE", clock, body, foot)
+
+    def slide_cup(self, s, clock, t):
+        e = pesc
+        title = 'TOURNAMENT: %s' % t['name'].upper()
+        sub = ' &nbsp;'.join(x for x in (e(t.get('game') or ''), ('starts ' + ampm(t['time'])) if TIME_RE.match(t.get('time') or '') else '') if x)
+        if t['state'] == 'signup':
+            players = t['players']
+            cells = ''.join('<td class="mid" width="25%%">%s</td>%s' % (e(p), '</tr><tr>' if i % 4 == 3 else '')
+                            for i, p in enumerate(players[:32]))
+            body = ('<span class="big">SIGN-UPS OPEN</span><br><span class="txt dim">%s</span><br><br>'
+                    '<span class="lbl">%d PLAYER%s SO FAR</span><table width="100%%" cellpadding="%d"><tr>%s</tr></table>'
+                    '<span class="txt">Sign up in Palms LAN Center: Tournaments &gt; Sign Up.</span>'
+                    % (sub, len(players), '' if len(players) == 1 else 'S', px(s, 4), cells))
+            return slide_page(self, s, 'trophy', title, clock, body, '')
+        rounds = self.cup_bracket(t)
+        champ = t.get('champion') if t['state'] == 'done' else ''
+        # rounds that fit: the bracket from the first round with 8 matches or fewer
+        r0 = 0
+        while r0 < len(rounds) - 1 and len(rounds[r0]) > 8:
+            r0 += 1
+        playing = next((r for r, ms in enumerate(rounds) if any(m['a'] and m['b'] and not m['win'] for m in ms)), None)
+        if playing is not None and playing < r0:
+            r0 = playing
+            shown = [rounds[r0]]
+        else:
+            shown = rounds[r0:]
+
+        def who(p, won, lost):
+            if p is None:
+                return '<span class="dim">bye</span>'
+            if not p:
+                return '<span class="dim">-</span>'
+            return '<span class="%s">%s</span>' % ('now' if won else ('dim' if lost else ''), e(p))
+
+        cols = []
+        fs = px(s, 22 if len(shown[0]) <= 4 else (18 if len(shown[0]) <= 8 else 15))
+        for r, ms in zip(range(r0, r0 + len(shown)), shown):
+            cells = []
+            for m in ms[:16]:
+                wa, wb = m['win'] == 'a', m['win'] == 'b'
+                score = (' <span class="dim">%s</span>' % e(m['score'])) if m['score'] else ''
+                cells.append('<table width="100%%" cellspacing="0" cellpadding="%d" style="border: 1px solid #31616B; '
+                             'margin: %dpx 0"><tr><td style="font: bold %dpx Arial">%s</td></tr>'
+                             '<tr><td style="font: bold %dpx Arial">%s%s</td></tr></table>'
+                             % (px(s, 3), px(s, 3), fs, who(m['a'], wa, wb), fs, who(m['b'], wb, wa), score))
+            cols.append('<td valign="middle" width="%d%%"><span class="lbl">%s</span>%s</td>'
+                        % (100 // len(shown), self.round_name(r, len(rounds)).upper(), ''.join(cells)))
+        body = ''
+        if champ:
+            body = '<span class="big">CHAMPION: %s</span><br>' % e(champ)
+        elif sub:
+            body = '<span class="txt dim">%s</span><br>' % sub
+        body += '<table width="100%%" cellspacing="%d" cellpadding="0"><tr>%s</tr></table>' % (px(s, 6), ''.join(cols))
+        return slide_page(self, s, 'trophy', title, clock, body, '')
+
+    def slide_vote(self, s, clock, arg):
+        e = pesc
+        v = self.vote
+        counts = self.vote_counts()
+        total = sum(counts)
+        best = max(counts) if counts else 0
+        rows = []
+        for i, name in enumerate(v['options']):
+            won = v['state'] == 'closed' and v.get('winner') == i + 1
+            pct = (100 * counts[i] // total) if total else 0
+            bar = ('<table width="%d%%" cellspacing="0" cellpadding="0"><tr><td bgcolor="%s" height="%d"></td></tr></table>'
+                   % (max(pct, 1), '#FFDB29' if won or (counts[i] == best and best) else '#31616B', px(s, 22)))
+            rows.append('<tr><td class="mid %s" width="40%%">%s</td><td>%s</td><td class="mid" width="%d" align="right">%d</td></tr>'
+                        % ('now' if won else '', e(name), bar, px(s, 60), counts[i]))
+        if v['state'] == 'open':
+            left = max(0, int(v['deadline'] - self.loop.time()))
+            status = 'Vote in Palms LAN Center: What\'s On &gt; Vote. Closes in %d:%02d.' % (left // 60, left % 60)
+        elif v.get('winner'):
+            status = '%s won with %d of %d votes.' % (e(v['options'][v['winner'] - 1]), counts[v['winner'] - 1], total)
+        else:
+            status = 'Voting closed.'
+        body = ('<span class="big">%s</span><br><br><table width="100%%" cellspacing="0" cellpadding="%d">%s</table>'
+                % (e(v['question']), px(s, 8), ''.join(rows)))
+        return slide_page(self, s, 'star', 'NEXT GAME VOTE' if v['state'] == 'open' else 'VOTE RESULT', clock, body,
+                          '%s &nbsp;%d vote%s' % (status, total, '' if total == 1 else 's'))
+
+    def start_projector(self):
+        try:
+            port = int(self.cfg.get('projector_port', '8080'))
+        except ValueError:
+            port = 8080
+        if port <= 0:
             return
         try:
-            here = c.writer.get_extra_info('sockname')[0]     # this server's address, as that PC sees it
-        except Exception:
+            httpd = ThreadingHTTPServer(('0.0.0.0', port), make_projector_handler(self))
+        except OSError as e:
+            log('Unable to start the projector page on port %d (%s). The port may be in use.' % (port, e))
             return
-        c.send('UPDATE', ver, 'http://%s:%s/' % (here, self.cfg.get('http_port', '8080')))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        log('Projector page is running: http://<this server>:%d/' % port)
 
     async def pinger(self):
-        self._announced = self.published_client()
         while True:
             await asyncio.sleep(PING_SECONDS)
-            # a new LAN Center was just published: tell everyone connected
-            ver = self.published_client()
-            if ver != self._announced:
-                self._announced = ver
-                for c in list(self.clients):
-                    self.offer_update(c)
             now = int(asyncio.get_running_loop().time() * 1000)
             for c in self.signed_in_clients():
                 if 'ping' in c.caps:
@@ -2565,33 +2276,24 @@ class PalmsServer:
             await asyncio.sleep(self.beacon_seconds)
 
     def start_file_page(self):
+        if self.cfg.get('file_page', 'off').strip().lower() not in ('on', 'yes', '1', 'true'):
+            return
         try:
-            port = int(self.cfg.get('http_port', '8080'))
+            port = int(self.cfg.get('http_port', '8081'))
         except ValueError:
-            port = 8080
+            port = 8081
         if port <= 0:
             return
         try:
             FILES_DIR.mkdir(exist_ok=True)
-            (FILES_DIR / 'client').mkdir(exist_ok=True)
         except OSError as e:
             log('Could not make %s (%s). Uploads will fail until it exists.' % (FILES_DIR, e))
-        for n in RETIRED:
-            try:
-                (FILES_DIR / 'client' / n).unlink()
-                log('File page: removed client/%s (no longer used by Palms LAN Center).' % n)
-            except FileNotFoundError:
-                pass
-            except OSError as e:
-                log('File page: unable to remove client/%s (%s).' % (n, e.strerror))
-        handler = make_files_handler(FILES_DIR, self.name)
         try:
-            httpd = http.server.ThreadingHTTPServer(('0.0.0.0', port), handler)
+            httpd = ThreadingHTTPServer(('0.0.0.0', port), make_files_handler(FILES_DIR, self.name))
         except OSError as e:
             log('Unable to start the file page on port %d (%s). The port may be in use.' % (port, e))
             return
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        self.file_page = True
         log('File page is running: http://<this server>:%d/  (files are in %s)' % (port, FILES_DIR))
 
     async def run(self):
@@ -2600,6 +2302,8 @@ class PalmsServer:
             % (VERSION, self.name, self.tcp_port, self.beacon_port))
         self.tasks = [asyncio.create_task(self.beacon()), asyncio.create_task(self.pinger()),
                       asyncio.create_task(self.pak_watch())]
+        self.loop = asyncio.get_running_loop()
+        self.start_projector()
         self.start_file_page()
         async with server:
             await server.serve_forever()

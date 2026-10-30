@@ -1,11 +1,5 @@
-' Palms LAN Center Cleanup - resets a test PC.
-' Removes all games installed by Palms LAN Center, their registry settings and
-' Windows Firewall exceptions, incomplete downloads, and the Palms LAN Center
-' settings (the Palms Server then treats it as a new PC). The program is not removed.
-' /quiet: nothing is asked or shown (the uninstaller of Palms LAN Center Setup runs it like this).
-' Since 0.9.0 the settings and the list of games are in the registry, under
-' HKEY_LOCAL_MACHINE\Software\Palms Arcade (palms.ini and gamepaks.ini until 0.8.1).
-' Runs on Windows 98 (Windows Script Host 1.0) and later.
+' Palms LAN Center Cleanup - resets a PC: removes every game Palms LAN Center installed, and its settings.
+' /quiet: asks nothing (the uninstaller runs it like this).
 Option Explicit
 Const FOLDER = "C:\PalmsLAN"
 
@@ -37,7 +31,7 @@ If IsRunning() Then
     End If
 End If
 
-' 2. Each game it installed: from the registry, and from gamepaks.ini on a PC that never ran 0.9.0
+' 2. Each game it installed: from the registry, and from gamepaks.ini (older versions)
 base = RegBase()
 Set games = ReadIni(here & "\gamepaks.ini")
 If Len(base) > 0 Then AddRegGames games
@@ -119,7 +113,7 @@ If fso.FolderExists(menu) Then
     If fso.GetFolder(menu).Files.Count = 0 And fso.GetFolder(menu).SubFolders.Count = 0 Then fso.DeleteFolder menu, True
 End If
 
-' 4. The old settings files (0.8.1 and earlier), cached game icons and work files
+' 4. Settings files from older versions, cached game icons and work files
 For Each t In Array("palms.ini", "gamepaks.ini", "palms.ini.old", "gamepaks.ini.old")
     If fso.FileExists(here & "\" & t) Then fso.DeleteFile here & "\" & t, True
 Next
@@ -181,7 +175,7 @@ Sub AddRegGames(d)
     Next
 End Sub
 
-' A LAN Center setting: the registry, or palms.ini on a PC that never ran 0.9.0
+' A LAN Center setting: the registry, or palms.ini (older versions)
 Function Setting(key)
     Setting = ""
     If Len(base) > 0 Then Setting = RegValue(base & "\LAN Center\" & key)

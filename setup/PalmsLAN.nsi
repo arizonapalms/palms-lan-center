@@ -1,5 +1,5 @@
 ; Palms LAN Center Setup: installs Palms LAN Center on Windows 98 and later (NSIS 3, ANSI).
-; makensis -DVERSION=x.y.z -DSRC=<folder with the release files> -DOUT=<setup.exe> PalmsLAN.nsi
+; makensis -DVERSION=0.9.3-alpha -DNUMVER=0.9.3 -DSRC=<folder with the release files> -DOUT=<setup.exe> PalmsLAN.nsi
 
 Unicode false
 SetCompressor /SOLID lzma
@@ -11,6 +11,9 @@ XPStyle on
 
 !ifndef VERSION
   !define VERSION "0.0.0"
+!endif
+!ifndef NUMVER
+  !define NUMVER "${VERSION}"
 !endif
 !ifndef SRC
   !define SRC "files"
@@ -37,11 +40,11 @@ ShowInstDetails show
 ShowUninstDetails show
 InstallColors /windows
 
-VIProductVersion "${VERSION}.0"
+VIProductVersion "${NUMVER}.0"
 VIAddVersionKey "ProductName" "Palms LAN Center"
 VIAddVersionKey "CompanyName" "Palms Arcade"
 VIAddVersionKey "FileDescription" "Palms LAN Center Setup"
-VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileVersion" "${NUMVER}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "Palms Arcade"
 

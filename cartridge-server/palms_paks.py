@@ -20,9 +20,14 @@ import threading
 import time
 import urllib.parse
 from collections import deque
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 
-VERSION = "2.4"
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+VERSION = "2.5.1"
 CONFIG = "/etc/palms-paks.ini"
 ADMINS = "/etc/palms-paks/admins"
 REALM = "Palms Cartridge Server"
@@ -117,6 +122,7 @@ class Pak:
         self.sig = ""           # changes whenever the pak does
         self.icon = ""          # icons/<name>.bmp once made
         self.png = ""
+        self.shot = ""          # icons/<name>-shot.jpg, if the cartridge has a screenshot
         self.games = []         # a pack's games: dicts with id, name, players, exe, args...
         self.meta = {}          # from its fingerprints: when, who approved it...
 
@@ -211,7 +217,7 @@ def look_at(pak, memory, now):
         pak.message = "Waiting for %s (%d/%d pieces)" % (missing[0], len(pieces), count)
         return
     # the small files pak.ini mentions (copying a pak in Explorer can bring pak.ini before setup.reg)
-    small = [info.get(k, "") for k in ("reg", "notes", "icon")] + [g.get("icon", "") for g in pak.games]
+    small = [info.get(k, "") for k in ("reg", "notes", "icon", "screenshot")] + [g.get("icon", "") for g in pak.games]
     for f in small:
         if f and f.lower() not in names:
             pak.status = "copying"
@@ -458,6 +464,10 @@ def make_icon(state, pak, icon, icon_from, name):
     os.makedirs(folder, exist_ok=True)
     sheet.save(os.path.join(folder, name + ".bmp"), "BMP")
     flat32.save(os.path.join(folder, name + ".png"), "PNG")
+    try:
+        gif_icon(big, os.path.join(folder, name + ".gif"))
+    except Exception as e:
+        log("  Unable to create %s.gif: %s" % (name, e))
     flat16.save(os.path.join(folder, name + "-16.png"), "PNG")
     try:
         write_ico(os.path.join(folder, name + ".ico"), [(pic32, mask32), (pic16, mask16)])
@@ -500,6 +510,44 @@ def write_ico(path, images):
     with open(path, "wb") as f:
         f.write(out.getvalue())
 
+def gif_icon(im, path):
+    """A 32 px GIF with a see-through background and no white edges, for the projector (dark, IE5)."""
+    im = im.convert("RGBA")
+    if im.size != (32, 32):
+        im = im.resize((32, 32), Image.LANCZOS)
+    rgb = Image.new("RGB", im.size, (0, 0, 0))
+    rgb.paste(im, mask=im.split()[3])
+    pal = rgb.quantize(colors=255)
+    alpha = im.split()[3].load()
+    px = pal.load()
+    for y in range(32):
+        for x in range(32):
+            if alpha[x, y] < 128:
+                px[x, y] = 255
+    pal.save(path, "GIF", transparency=255)
+
+
+def make_shot(state, pak, shot, name):
+    """icons/<name>-shot.jpg: the cartridge's screenshot, at most 640 x 480, for the projector."""
+    if Image is None or not shot:
+        return ""
+    real = files_in(pak.path).get(shot.lower())
+    if not real:
+        return ""
+    try:
+        im = Image.open(os.path.join(pak.path, real))
+        im.load()
+        im = im.convert("RGB")
+        im.thumbnail((640, 480), Image.LANCZOS)
+        folder = os.path.join(state, "icons")
+        os.makedirs(folder, exist_ok=True)
+        im.save(os.path.join(folder, name + "-shot.jpg"), "JPEG", quality=85)
+    except Exception as e:
+        log("  Unable to read the screenshot %s: %s" % (shot, e))
+        return ""
+    return "icons/%s-shot.jpg" % name
+
+
 def tidy_icons(state, keep):
     folder = os.path.join(state, "icons")
     try:
@@ -507,6 +555,8 @@ def tidy_icons(state, keep):
             stem = os.path.splitext(f.name)[0]
             if stem.endswith("-16"):
                 stem = stem[:-3]
+            elif stem.endswith("-shot"):
+                stem = stem[:-5]
             if f.is_file() and stem not in keep:
                 os.remove(f.path)
     except OSError:
@@ -542,7 +592,7 @@ def catalog_lines(ready, url):
     """The list, the same shape the LAN Center server passes on:
     PAKS|format|how many paks|when|address of this server
     PAK|id|name|version|players|folder|exe|args|config exe|config args|reg|notes|
-        pak folder|archive|pieces|archive bytes|installed size|files|icon|made|revision
+        pak folder|archive|pieces|archive bytes|installed size|files|icon|made|revision|screenshot
     and after a pack's PAK line, one line for each game in it (its exe is blank):
     GAME|pak id|game id|name|players|exe|args|start in|config exe|config args|icon"""
     lines = ["PAKS|2|%d|%s|%s" % (len(ready), time.strftime("%Y-%m-%d %H:%M:%S"), url)]
@@ -556,7 +606,7 @@ def catalog_lines(ready, url):
         lines.append("|".join(["PAK"] + [clean(i.get(k, "")) for k in CATALOG_FIELDS] +
                               [folder_url, clean(archive), str(len(p.pieces)), str(p.got_bytes),
                                clean(i.get("size", "")), clean(i.get("files", "")), p.icon,
-                               clean(i.get("made", "")), clean(i.get("revision", ""))]))
+                               clean(i.get("made", "")), clean(i.get("revision", "")), p.shot]))
         for g in p.games:
             lines.append("|".join(["GAME", i["id"]] + [clean(g.get(k, "")) for k in GAME_FIELDS] + [g["icon_url"]]))
     return lines
@@ -876,6 +926,7 @@ class PakServer:
         self.memory = {}        # inbox: sizes of paks still copying
         self.settle = {}        # inbox: pak -> (everything in it, since when)
         self.icons = {}         # pak signature -> (bmp, png)
+        self.shots = {}         # pak signature -> icons/<name>-shot.jpg
         self.last = {}          # pak -> status, for the log
         self.view = {"inbox": [], "waiting": [], "library": []}
         self.ready = []
@@ -1297,6 +1348,10 @@ class PakServer:
                     g["icon_url"], g["png"] = self.icons[key]
                 if p.games and not p.png:
                     p.png = p.games[0]["png"]
+                if p.sig not in self.shots:
+                    self.shots[p.sig] = make_shot(self.state, p, i.get("screenshot", ""), "%s-%s" % (i["id"], p.sig))
+                p.shot = self.shots[p.sig]
+            self.shots = {k: v for k, v in self.shots.items() if any(p.sig == k for p in shown)}
 
             self.view = {"inbox": inbox, "waiting": waiting, "library": library}
             self.ready = ready
@@ -1321,6 +1376,7 @@ class PakServer:
                 log("Catalog updated: %d cartridge(s) in the library" % len(ready))
                 keep = {p.icon[6:-4] for p in shown if p.icon}
                 keep |= {g["icon_url"][6:-4] for p in shown for g in p.games if g["icon_url"]}
+                keep |= {p.shot[6:-9] for p in shown if p.shot}
                 tidy_icons(self.state, keep)
             key = tuple((p.area, p.rel, p.status, p.message) for p in inbox + waiting + library) + (len(ready),)
             if key != self.page_key:
@@ -1734,6 +1790,8 @@ def admin_pak(srv, user, area, name):
     pairs = []
     if p.png:
         pairs.append(("Icon", icon(p.png, 32)))
+    if p.shot:
+        pairs.append(("Screenshot", '<img src="/%s" width="320" alt="" border="0">' % e(p.shot)))
     pairs += [("Name", "<b>%s</b>" % e(i.get("name", ""))),
               ("ID", mono(i.get("id", ""))),
               ("Version", e(ver_text(i)) or "-"),

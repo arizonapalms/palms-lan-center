@@ -707,6 +707,14 @@ Begin VB.Form frmMain
          Index           =   7
          Visible         =   0   'False
       End
+      Begin VB.Menu mnuViewSep
+         Caption         =   "-"
+      End
+      Begin VB.Menu mnuViewProj
+         Caption         =   "P&rojector"
+         Enabled         =   0   'False
+         Shortcut        =   {F11}
+      End
    End
    Begin VB.Menu mnuTools
       Caption         =   "&Tools"
@@ -769,6 +777,13 @@ Begin VB.Form frmMain
       End
       Begin VB.Menu mnuAdminCup
          Caption         =   "New To&urnament..."
+         Enabled         =   0   'False
+      End
+      Begin VB.Menu mnuAdminSep3
+         Caption         =   "-"
+      End
+      Begin VB.Menu mnuAdminProj
+         Caption         =   "&Projector Settings..."
          Enabled         =   0   'False
       End
    End
@@ -994,14 +1009,6 @@ Private mPingSent As Long
 Private mPingMs As Long
 Private mServerVer As String
 
-' ---- updating itself (the server says when there's a newer version: UPDATE)
-Private mUpdateVer As String          ' the version on the server
-Private mUpdateUrl As String          ' its file page, like http://10.0.200.71:8080/
-Private mUpdateWait As Long           ' seconds to wait first, so the PCs don't all download at once
-Private mUpdating As Boolean
-Private mUpdateFailedVer As String    ' tried this session and it failed: don't keep trying
-Private mUpdateToldVer As String      ' already said that it's waiting
-Private mSelfUpdate As Boolean        ' closing so palms-update.vbs can replace this program
 
 ' ---- the look
 Private mPage As Integer
@@ -1062,6 +1069,13 @@ Private mSchedInfo As Collection      ' SCHEDINFO lines waiting for SCHEDEND
 Private mSchedIn() As String          ' who's in: nicknames separated by commas
 Private mSchedInN() As Long
 Private mSchedNote() As String        ' the host's details for the event, ~ between lines
+Private mSchedGame() As String        ' the game it's for (cartridge/game), for the projector
+Private mSchedServer() As String      ' the game server's address, like 10.0.200.80:27960
+Private mSchedConnect() As String     ' how to connect to it
+Private mPendingGame As String        ' game|server|how to connect for the event just added
+Private mProjSecs As Long             ' the projector: seconds per slide, the slides, the web page's port
+Private mProjSlides As String
+Private mProjPort As String
 Private mPendingNote As String        ' details for the event just added, sent once the server says its ID
 Private mRemind As String             ' Remind Me: id@time;id@time (kept in the registry)
 Private mRemindDone As String         ' reminders already popped up
@@ -1278,7 +1292,6 @@ Private Sub Form_Load()
     txtServer.Text = mServerHost
 
     Randomize
-    ' started again by palms-update.vbs after updating itself (see StartUpdate)
     cmdLine = LCase$(Command$)
     If InStr(cmdLine, "/min") > 0 Then Me.WindowState = vbMinimized
     If InStr(cmdLine, "/signin") > 0 And Len(SettingGet("nick", "")) > 0 Then
@@ -1286,9 +1299,6 @@ Private Sub Form_Load()
         mMySeat = SettingGet("seat", "")
         mAutoRelogin = True
     End If
-    If InStr(cmdLine, "/updated") > 0 Then mWelcomeNote = "Palms LAN Center has been updated to " & AppVersion() & "."
-    ' where palms-update.vbs installs updates when it is run by hand
-    If CanSelfUpdate() Then SettingSet "program_folder", NoSlash(AppDir())
 
     ShowPage PG_SIGNIN
     WheelHook Me.hWnd
@@ -1308,7 +1318,6 @@ End Sub
 ' Closing with a game still installing: check first
 Private Sub Form_QueryUnload(Cancel As Integer, UnloadMode As Integer)
     If UnloadMode = vbAppWindows Or UnloadMode = vbAppTaskManager Then Exit Sub
-    If mSelfUpdate Then Exit Sub
     If Len(gJobId) > 0 Then
         If MsgBox(LibPakName(gJobId) & " is being installed." & vbCrLf & vbCrLf & _
                   "Cancel the installation and exit? Files already downloaded are kept, and the download resumes next time.", vbYesNo + vbQuestion + vbDefaultButton2, "Palms LAN Center") <> vbYes Then
@@ -1331,12 +1340,7 @@ Private Sub Form_Unload(Cancel As Integer)
     tmrClock.Enabled = False
     mClosing = True
     If sckTCP.State = sckConnected Then
-        ' updating: the server keeps quiet about it, as the LAN Center is back in a few seconds
-        If mSelfUpdate Then
-            SendLine "QUIT|update"
-        Else
-            SendLine "QUIT"
-        End If
+        SendLine "QUIT"
         ' give the goodbye half a second to reach the server
         t = Timer
         Do While Timer - t < 0.5 And Timer >= t
@@ -4491,7 +4495,7 @@ Private Sub DrawLibPageNow()
     s = ToolsMissing()
     If Len(s) > 0 Then
         ic = IC_WARN
-        s = "This PC is missing " & s & ". Run palms-update.vbs to install the missing files."
+        s = "This PC is missing " & s & ". Reinstall Palms LAN Center to put them back."
     ElseIf Len(gPakNote) > 0 And gPakCount > 0 Then
         ic = IC_WARN
         s = gPakNote
@@ -5519,6 +5523,9 @@ Private Sub FinishSched()
         ReDim mSchedIn(0 To n - 1)
         ReDim mSchedInN(0 To n - 1)
         ReDim mSchedNote(0 To n - 1)
+        ReDim mSchedGame(0 To n - 1)
+        ReDim mSchedServer(0 To n - 1)
+        ReDim mSchedConnect(0 To n - 1)
         i = 0
         For Each v In mSchedBuild
             f = Split(CStr(v), "|")
@@ -5533,6 +5540,9 @@ Private Sub FinishSched()
         ReDim mSchedIn(0 To 0)
         ReDim mSchedInN(0 To 0)
         ReDim mSchedNote(0 To 0)
+        ReDim mSchedGame(0 To 0)
+        ReDim mSchedServer(0 To 0)
+        ReDim mSchedConnect(0 To 0)
     End If
     mSchedCount = n
     Set mSchedBuild = Nothing
@@ -5541,7 +5551,12 @@ Private Sub FinishSched()
         For Each v In mSchedInfo
             f = Split(CStr(v), "|")
             k = SchedIndexOf(Fld(f, 1))
-            If k >= 0 Then
+            If k < 0 Then
+            ElseIf UCase$(f(0)) = "SCHEDGAME" Then
+                mSchedGame(k) = Fld(f, 2)
+                mSchedServer(k) = Fld(f, 3)
+                mSchedConnect(k) = RestOf(f, 4)
+            Else
                 mSchedInN(k) = Val(Fld(f, 2))
                 mSchedIn(k) = Fld(f, 3)
                 mSchedNote(k) = RestOf(f, 4)
@@ -5568,6 +5583,7 @@ Private Sub FinishSched()
     DrawNext
     RefreshWhatsTools
     RefreshOpenForm "frmEventInfo"
+    RefreshOpenForm "frmProjector"
 End Sub
 
 Private Function VoteSecsLeft() As Long
@@ -5599,11 +5615,6 @@ Private Sub ClockTick()
         StartListening
     End If
     If Not mSignedIn Then Exit Sub
-    ' a newer LAN Center to install, a few seconds after the server said so
-    If mUpdateWait > 0 Then
-        mUpdateWait = mUpdateWait - 1
-        If mUpdateWait = 0 Then TryUpdate
-    End If
     ' Who's Here: our pings every 5 seconds, everyone's details every 10
     If mPage = PG_WHO And Me.WindowState <> vbMinimized Then
         mWhoTick = mWhoTick + 1
@@ -5620,8 +5631,6 @@ Private Sub ClockTick()
         mLastMinute = hm
         CheckUpNext
         CheckReminders
-        ' an update that was put off (Busy, a game installing, a dialog box open)
-        If Len(mUpdateVer) > 0 And mUpdateWait = 0 Then TryUpdate
         DrawNext
         If mPage = PG_WHATSON Then
             DrawHeader
@@ -6056,6 +6065,8 @@ Private Sub RefreshOpenForm(ByVal nm As String)
         frmEventInfo.RefreshInfo
     Case "frmVote"
         frmVote.RefreshSugg
+    Case "frmProjector"
+        frmProjector.DataChanged
     End Select
 End Sub
 
@@ -6086,6 +6097,9 @@ Public Function SchedText(ByVal i As Long, ByVal what As String) As String
     Case "name": SchedText = mSchedName(i)
     Case "note": SchedText = mSchedNote(i)
     Case "in": SchedText = mSchedIn(i)
+    Case "game": SchedText = mSchedGame(i)
+    Case "server": SchedText = mSchedServer(i)
+    Case "connect": SchedText = mSchedConnect(i)
     End Select
 End Function
 
@@ -6097,6 +6111,100 @@ End Function
 Public Sub SetPendingNote(ByVal s As String)
     mPendingNote = s
 End Sub
+
+' Add Event: game|server|how to connect, sent once the server says the new event's ID
+Public Sub SetPendingGame(ByVal s As String)
+    mPendingGame = s
+End Sub
+
+' ---- for the projector
+
+Public Function SchedCount() As Long
+    SchedCount = mSchedCount
+End Function
+
+' The event on now (the last one that has started), or -1
+Public Function SchedNowIndex() As Long
+    Dim i As Long, nowM As Long
+    SchedNowIndex = -1
+    nowM = PartyMinutes(Format$(Time, "hh:nn"))
+    For i = 0 To mSchedCount - 1
+        If PartyMinutes(mSchedTime(i)) <= nowM Then
+            If SchedNowIndex < 0 Then
+                SchedNowIndex = i
+            ElseIf PartyMinutes(mSchedTime(i)) >= PartyMinutes(mSchedTime(SchedNowIndex)) Then
+                SchedNowIndex = i
+            End If
+        End If
+    Next
+End Function
+
+' The next event to start, or -1
+Public Function SchedNextIndex() As Long
+    Dim i As Long, nowM As Long
+    SchedNextIndex = -1
+    nowM = PartyMinutes(Format$(Time, "hh:nn"))
+    For i = 0 To mSchedCount - 1
+        If PartyMinutes(mSchedTime(i)) > nowM Then
+            If SchedNextIndex < 0 Then
+                SchedNextIndex = i
+            ElseIf PartyMinutes(mSchedTime(i)) < PartyMinutes(mSchedTime(SchedNextIndex)) Then
+                SchedNextIndex = i
+            End If
+        End If
+    Next
+End Function
+
+Public Function ServerHasProjector() As Boolean
+    ServerHasProjector = (VerNum(mServerVer) >= 600)
+End Function
+
+' Seconds per slide, and the slides (now, sched, cup, vote), as the host set them
+Public Function ProjSeconds() As Long
+    ProjSeconds = mProjSecs
+    If ProjSeconds < 5 Then ProjSeconds = 15
+End Function
+
+Public Function ProjSlides() As String
+    If Len(mProjPort) = 0 Then
+        ProjSlides = "now,sched,cup,vote"
+    Else
+        ProjSlides = mProjSlides
+    End If
+End Function
+
+' The projector web page, like http://10.0.200.71:8080/
+Public Function ProjUrl() As String
+    If Len(mProjPort) > 0 And Len(mServerHost) > 0 Then ProjUrl = "http://" & mServerHost & ":" & mProjPort & "/"
+End Function
+
+Public Function PalmsServerName() As String
+    PalmsServerName = mServerName
+End Function
+
+' The vote: what is state (none, open or closed), question, count, total, winner or left (seconds)
+Public Function VoteText(ByVal what As String) As String
+    Dim s As Long
+    Select Case what
+    Case "state": VoteText = mVoteState
+    Case "question": VoteText = mVoteQ
+    Case "count": VoteText = CStr(mVoteCount)
+    Case "total": VoteText = CStr(mVoteTotal)
+    Case "winner": VoteText = CStr(mVoteWinner)
+    Case "left"
+        s = (mVoteDeadline - GetTickCount()) \ 1000
+        If s < 0 Then s = 0
+        VoteText = CStr(s)
+    End Select
+End Function
+
+Public Function VoteChoice(ByVal i As Long) As String
+    If i >= 0 And i < mVoteCount And i <= 5 Then VoteChoice = mVoteName(i)
+End Function
+
+Public Function VoteVotes(ByVal i As Long) As Long
+    If i >= 0 And i < mVoteCount And i <= 5 Then VoteVotes = mVoteVotes(i)
+End Function
 
 Public Function SuggCount() As Long
     SuggCount = mSuggCount
@@ -6758,6 +6866,7 @@ End Sub
 ' A tournament changed (or went): keep the page, the toolbar and the sidebar up to date
 Private Sub CupChanged()
     Dim k As Long
+    RefreshOpenForm "frmProjector"
     If CupK() < 0 Then
         mCupMatch = -1
         If gCupCount > 0 Then
@@ -7012,15 +7121,6 @@ Public Function DiagLive() As String
     If Len(mServerHost) > 0 Then t = mServerHost & ":" & mServerPort Else t = "Not set"
     s = s & DiagRow("Address", t)
     s = s & DiagRow("Version", mServerVer)
-    If Len(mUpdateVer) > 0 And VerNum(mUpdateVer) > VerNum(AppVersion()) Then
-        t = "Palms LAN Center " & mUpdateVer & " available"
-        If mUpdateVer = mUpdateFailedVer Or SettingGet("update_tried", "") = mUpdateVer Then t = t & " (did not install automatically)"
-    ElseIf VerNum(mServerVer) >= 408 Then
-        t = "Up to date"
-    Else
-        t = "Not available (needs Palms Server 0.4.8)"
-    End If
-    s = s & DiagRow("Updates", t)
     s = s & DiagRow("Connection", SocketWord())
     s = s & DiagRow("Last status", mConnText)
     If mPingMs >= 0 And sckTCP.State = sckConnected Then t = mPingMs & " ms" Else t = "-"
@@ -7133,149 +7233,6 @@ Private Sub ScrollBy(sb As VScrollBar, ByVal delta As Long)
 End Sub
 
 ' ================================================================ updating itself
-
-' The Palms Server has a newer LAN Center on its file page (UPDATE). Install it, unless that would
-' interrupt something: then it's put off, and tried again every minute.
-Private Sub TryUpdate()
-    Dim why As String
-    If Len(mUpdateVer) = 0 Or mUpdating Then Exit Sub
-    If VerNum(mUpdateVer) <= VerNum(AppVersion()) Then Exit Sub
-    If mUpdateVer = mUpdateFailedVer Then Exit Sub
-    If Not CanSelfUpdate() Then
-        UpdateNote "Palms LAN Center " & mUpdateVer & " is available. This copy was not installed with Palms LAN Center Setup or palms-update.vbs, so it is not updated automatically."
-        Exit Sub
-    End If
-    ' one try per version: if it didn't take, don't go round in circles
-    If SettingGet("update_tried", "") = mUpdateVer Then
-        UpdateNote "Palms LAN Center " & mUpdateVer & " is available, but it did not install automatically. To install it, run palms-update.vbs in " & NoSlash(AppDir()) & "."
-        Exit Sub
-    End If
-    If Len(gJobId) > 0 Then
-        why = "when the current installation finishes"
-    ElseIf mBusy Then
-        why = "when your status is no longer Busy"
-    ElseIf IsFormLoaded("frmCartWizard") Then
-        why = "when the Make Cartridge Wizard is closed"
-    ElseIf OtherWindowOpen() Then
-        why = "when the open dialog box is closed"
-    End If
-    If Len(why) > 0 Then
-        UpdateNote "Palms LAN Center " & mUpdateVer & " is available. It will be installed " & why & "."
-        Exit Sub
-    End If
-    StartUpdate
-End Sub
-
-' Said once per version: in Chat, or on the sign-in page
-Private Sub UpdateNote(ByVal s As String)
-    If mUpdateToldVer = mUpdateVer Then Exit Sub
-    mUpdateToldVer = mUpdateVer
-    If mSignedIn Then
-        AddSys IC_DOWNLOAD, s, C_BLUE
-    Else
-        lblFind.Caption = s
-    End If
-End Sub
-
-' Only an installed copy updates itself, and not in Visual Basic: one palms-update.vbs installed in C:\PalmsLAN,
-' or one Palms LAN Center Setup installed (uninst.exe beside it). Not a copy in the project folder.
-Private Function CanSelfUpdate() As Boolean
-    If InIDE() Then Exit Function
-    If StrComp(AppDir(), "C:\PalmsLAN\", vbTextCompare) = 0 Then
-        CanSelfUpdate = True
-    Else
-        CanSelfUpdate = FileHere(AppDir() & "uninst.exe")
-    End If
-End Function
-
-Private Function NoSlash(ByVal s As String) As String
-    If Len(s) > 3 And Right$(s, 1) = "\" Then s = Left$(s, Len(s) - 1)
-    NoSlash = s
-End Function
-
-' Debug lines are left out of the compiled program, so this only fails in Visual Basic
-Private Function InIDE() As Boolean
-    On Error Resume Next
-    Debug.Print 1 / 0
-    InIDE = (Err.Number <> 0)
-    Err.Clear
-End Function
-
-' A dialog box someone may be typing in
-Private Function OtherWindowOpen() As Boolean
-    Dim i As Integer
-    For i = 0 To Forms.Count - 1
-        Select Case Forms(i).Name
-        Case "frmMain", "frmToast", "frmAlert"
-        Case Else
-            OtherWindowOpen = True
-        End Select
-    Next
-End Function
-
-' Download palms-update.vbs from the server, start it, and close. It waits for this program to close,
-' installs the new version and starts it again: signed in, and minimized if a game had the screen.
-Private Sub StartUpdate()
-    Dim vbs As String, url As String, args As String, r As Long, s As String
-    mUpdating = True
-    url = mUpdateUrl
-    If Right$(url, 1) <> "/" Then url = url & "/"
-    vbs = AppDir() & "palms-update.vbs"
-    s = "Updating Palms LAN Center to " & mUpdateVer & "..."
-    SetConn IC_DOWNLOAD, s
-    If mSignedIn Then
-        AddSys IC_DOWNLOAD, "Updating Palms LAN Center to " & mUpdateVer & ". It starts again in a few seconds.", C_BLUE
-    Else
-        lblFind.Caption = s
-    End If
-    DoEvents
-    ' a fresh copy, never one from the Internet Explorer cache
-    r = URLDownloadToFile(0, url & "palms-update.vbs?t=" & CStr(Int(Timer * 100)), vbs, 0, 0)
-    If r <> 0 Or Not LooksLikeUpdater(vbs) Then
-        UpdateFailed "Unable to download the update from " & url & " (error " & Hex$(r) & ")."
-        Exit Sub
-    End If
-    args = "/auto"
-    If mSignedIn Or mAutoRelogin Then args = args & " /signin"
-    If Me.WindowState = vbMinimized Or GetForegroundWindow() <> Me.hWnd Then args = args & " /min"
-    SettingSet "update_tried", mUpdateVer
-    On Error GoTo Failed
-    Shell "wscript.exe //B //NoLogo " & Chr$(34) & vbs & Chr$(34) & " " & args, vbHide
-    On Error GoTo 0
-    mSelfUpdate = True
-    Unload Me
-    Exit Sub
-Failed:
-    UpdateFailed "Unable to start the update (" & Err.Description & ")."
-End Sub
-
-Private Sub UpdateFailed(ByVal why As String)
-    Dim s As String
-    mUpdating = False
-    mUpdateFailedVer = mUpdateVer
-    s = why & " To install Palms LAN Center " & mUpdateVer & ", run palms-update.vbs in " & NoSlash(AppDir()) & "."
-    SetConn IC_WARN, why
-    If mSignedIn Then
-        AddSys IC_WARN, s, C_RED
-    Else
-        lblFind.Caption = s
-    End If
-End Sub
-
-' The server's palms-update.vbs, and not an error page
-Private Function LooksLikeUpdater(ByVal path As String) As Boolean
-    Dim n As Integer, s As String
-    On Error GoTo Nope
-    n = FreeFile
-    Open path For Input As #n
-    Line Input #n, s
-    Close #n
-    LooksLikeUpdater = (InStr(s, "Palms LAN Center Setup") > 0)
-    Exit Function
-Nope:
-    On Error Resume Next
-    Close #n
-End Function
 
 ' ================================================================ finding and connecting
 
@@ -7472,17 +7429,6 @@ Private Sub HandleLine(ByVal lineText As String)
             SendLine "LOGIN|" & mMyNick & "|" & SeatOrDash(mMySeat)
         ElseIf mPendingLogin Then
             SendLine "LOGIN|" & mWantNick & "|" & SeatOrDash(mWantSeat)
-        End If
-
-    Case "UPDATE"
-        ' a newer LAN Center is on the server's file page
-        mUpdateVer = Fld(f, 1)
-        mUpdateUrl = Fld(f, 2)
-        If mSignedIn Then
-            ' not every PC at the same moment
-            mUpdateWait = 1 + Int(Rnd * 20)
-        Else
-            TryUpdate
         End If
 
     Case "KNOWN"
@@ -7693,15 +7639,25 @@ Private Sub HandleLine(ByVal lineText As String)
     Case "SCHEDEND"
         FinishSched
 
-    Case "SCHEDINFO"
+    Case "SCHEDINFO", "SCHEDGAME"
         If mSchedInfo Is Nothing Then Set mSchedInfo = New Collection
         mSchedInfo.Add lineText
+
+    Case "PROJINFO"
+        mProjSecs = Val(Fld(f, 1))
+        mProjSlides = Fld(f, 2)
+        mProjPort = Fld(f, 3)
+        RefreshOpenForm "frmProjector"
 
     Case "SCHEDADDED"
         ' the event the host just added: now its details can go with it
         If Len(mPendingNote) > 0 Then
             SendLine "SCHEDNOTE|" & Fld(f, 1) & "|" & mPendingNote
             mPendingNote = ""
+        End If
+        If Len(mPendingGame) > 0 Then
+            SendLine "SCHEDGAME|" & Fld(f, 1) & "|" & mPendingGame
+            mPendingGame = ""
         End If
 
     Case "SUGG"
@@ -7762,6 +7718,7 @@ Private Sub HandleLine(ByVal lineText As String)
         DrawNext
         UpdateMenus
         RefreshWhatsTools
+        RefreshOpenForm "frmProjector"
 
     Case "CUPCLEAR"
         ' all the tournaments follow: after them, a new one gets a pop-up
@@ -8117,6 +8074,16 @@ Private Sub UpdateMenus()
     mnuAdminVote.Enabled = mSignedIn And mIsAdmin And (mVoteState <> "open")
     mnuAdminVoteStop.Enabled = mSignedIn And mIsAdmin And (mVoteState = "open")
     mnuAdminCup.Enabled = mSignedIn And mIsAdmin And ServerHasCups()
+    mnuAdminProj.Enabled = mSignedIn And mIsAdmin And ServerHasProjector()
+    mnuViewProj.Enabled = mSignedIn
+End Sub
+
+Private Sub mnuViewProj_Click()
+    frmProjector.Show
+End Sub
+
+Private Sub mnuAdminProj_Click()
+    frmProjSet.Show vbModal, Me
 End Sub
 
 Private Sub mnuAdminSched_Click()

@@ -64,6 +64,16 @@ End Type
 Private mWav(0 To 7) As WavBuf
 Private mWavCount As Long
 Private Const HWND_TOPMOST As Long = -1
+
+' The Winsock control, when Palms LAN Center runs from the zip (Setup registers it otherwise).
+' Windows looks for MSWINSCK.OCX in the program's folder first.
+Private Declare Function WinsockRegister Lib "MSWINSCK.OCX" Alias "DllRegisterServer" () As Long
+Private Declare Function OcxOpenKey Lib "advapi32" Alias "RegOpenKeyExA" (ByVal hKey As Long, ByVal lpSubKey As String, ByVal ulOptions As Long, ByVal samDesired As Long, phkResult As Long) As Long
+Private Declare Function OcxQueryValue Lib "advapi32" Alias "RegQueryValueExA" (ByVal hKey As Long, ByVal lpValueName As String, ByVal lpReserved As Long, lpType As Long, ByVal lpData As String, lpcbData As Long) As Long
+Private Declare Function OcxCloseKey Lib "advapi32" Alias "RegCloseKey" (ByVal hKey As Long) As Long
+Private Const HKEY_CLASSES_ROOT As Long = &H80000000
+Private Const OCX_KEY_READ As Long = &H20019
+Private Const WINSOCK_CLSID As String = "CLSID\{248DD890-BB45-11CF-9ABC-0080C7E7B78D}\InprocServer32"
 Private Const SWP_NOSIZE As Long = &H1
 Private Const SWP_NOMOVE As Long = &H2
 
@@ -81,10 +91,34 @@ Public Sub Main()
             Exit Sub
         End If
     End If
+    If Not WinsockReady() Then Exit Sub
     LoadSettings
     frmMain.Show
     If Len(id) > 0 Then frmMain.UninstallFromCommand id
 End Sub
+
+' True if the Winsock control is registered, registering the copy beside PalmsLAN.exe if need be
+Private Function WinsockReady() As Boolean
+    Dim h As Long, buf As String, n As Long, f As String
+    If OcxOpenKey(HKEY_CLASSES_ROOT, WINSOCK_CLSID, 0, OCX_KEY_READ, h) = 0 Then
+        buf = String$(512, 0): n = 512
+        If OcxQueryValue(h, vbNullString, 0, 0, buf, n) = 0 And n > 1 Then f = Left$(buf, n - 1)
+        OcxCloseKey h
+        If Len(f) > 0 Then
+            If FileHere(f) Then WinsockReady = True: Exit Function
+        End If
+    End If
+    If Not FileHere(App.Path & "\MSWINSCK.OCX") Then
+        MsgBox "The Microsoft Winsock Control (MSWINSCK.OCX) is not installed." & vbCrLf & vbCrLf & _
+               "Run Palms LAN Center Setup, or copy MSWINSCK.OCX to " & App.Path & ".", vbCritical, "Palms LAN Center"
+        Exit Function
+    End If
+    On Error GoTo Failed
+    If WinsockRegister() = 0 Then WinsockReady = True: Exit Function
+Failed:
+    MsgBox "Unable to register MSWINSCK.OCX." & vbCrLf & vbCrLf & _
+           "Log on as an administrator and start Palms LAN Center again, or run Palms LAN Center Setup.", vbCritical, "Palms LAN Center"
+End Function
 
 Public Sub LoadSettings()
     gSoundOn = (SettingGet("sounds", "1") <> "0")

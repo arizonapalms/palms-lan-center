@@ -114,6 +114,7 @@ Public Type GamePak
     Size As Double        ' the game once it's installed
     Files As Long
     Icon As String        ' icons/quake-0ea49e6702.bmp on the pak server, or ""
+    Shot As String        ' its screenshot in the icons folder, like quake-0ea49e6702-shot.jpg, or ""
     Made As String        ' when the pak was made: a different one means an update
 End Type
 
@@ -773,6 +774,7 @@ Public Sub PaksAdd(f() As String)
     g.Made = F2(f, 19)
     g.Rev = F2(f, 20)                ' blank from older Cartridge Servers
     If Not (g.Rev Like "#" Or g.Rev Like "##" Or g.Rev Like "###") Then g.Rev = ""
+    g.Shot = IconFileOf(F2(f, 21))                ' blank from older Cartridge Servers
     If Len(g.Name) = 0 Then g.Name = g.Id
     If Len(g.Archive) = 0 Then g.Archive = "game.7z"
     If Len(g.Path) > 0 And Right$(g.Path, 1) <> "/" Then g.Path = g.Path & "/"
@@ -946,6 +948,46 @@ Public Function LibIconFile(ByVal key As String) As String
     End If
     g = HereGameIndex(key)
     If g >= 0 Then LibIconFile = mHereGame(g).Icon
+End Function
+
+' The screenshot of the cartridge a game is on, once it has been downloaded, or ""
+Public Function LibShotPath(ByVal key As String) As String
+    Dim c As Long
+    c = CatIndex(PakOf(key))
+    If c < 0 Then Exit Function
+    If Len(gPak(c).Shot) = 0 Then Exit Function
+    If FileThere(IconDir() & "\" & gPak(c).Shot) Then LibShotPath = IconDir() & "\" & gPak(c).Shot
+End Function
+
+' Every game on the Cartridge Server, sorted by name: key, a tab, then the name, one a line (vbLf between)
+Public Function LibGameList() As String
+    Dim i As Long, k As Long, order() As Long, t As Long, s As String
+    If gGameCount = 0 Then Exit Function
+    ReDim order(0 To gGameCount - 1)
+    For i = 0 To gGameCount - 1
+        order(i) = i
+    Next
+    ' few enough games that a simple sort will do
+    For i = 1 To gGameCount - 1
+        k = i
+        Do While k > 0
+            If StrComp(gGame(order(k - 1)).Name, gGame(order(k)).Name, vbTextCompare) <= 0 Then Exit Do
+            t = order(k - 1)
+            order(k - 1) = order(k)
+            order(k) = t
+            k = k - 1
+        Loop
+    Next
+    For i = 0 To gGameCount - 1
+        If Len(s) > 0 Then s = s & vbLf
+        s = s & gGame(order(i)).Key & vbTab & gGame(order(i)).Name
+    Next
+    LibGameList = s
+End Function
+
+' A game the Cartridge Server has (its key, like halflifepack/counterstrike16)
+Public Function LibOnServer(ByVal key As String) As Boolean
+    LibOnServer = (GameIndex(key) >= 0)
 End Function
 
 Public Function LibIconPath(ByVal key As String) As String
@@ -1180,7 +1222,7 @@ Public Function LibAskInstall(ByVal key As String) As Boolean
     missing = ToolsMissing()
     If Len(missing) > 0 Then
         MsgBox "The following files required by the Game Library are missing: " & missing & "." & vbCrLf & vbCrLf & _
-               "Run palms-update.vbs to install them. If they are still missing, the host must upload them on the Palms Server file page.", vbExclamation, "Game Library"
+               "Reinstall Palms LAN Center to put them back.", vbExclamation, "Game Library"
         Exit Function
     End If
     If Len(gPakBase) = 0 Then
@@ -2355,6 +2397,16 @@ Public Sub LibFetchIcons()
                     list = list & gPakBase & "icons/" & ico & vbCrLf
                     n = n + 1
                 End If
+            End If
+        End If
+    Next
+    ' the screenshots, for the projector
+    For i = 0 To gPakCount - 1
+        f = gPak(i).Shot
+        If Len(f) > 0 Then
+            If Not FileThere(IconDir() & "\" & f) Then
+                list = list & gPakBase & "icons/" & f & vbCrLf
+                n = n + 1
             End If
         End If
     Next

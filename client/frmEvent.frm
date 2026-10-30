@@ -2,7 +2,7 @@ VERSION 5.00
 Begin VB.Form frmEvent
    BorderStyle     =   3  'Fixed Dialog
    Caption         =   "Add Event"
-   ClientHeight    =   3780
+   ClientHeight    =   5130
    ClientLeft      =   45
    ClientTop       =   330
    ClientWidth     =   4800
@@ -16,8 +16,8 @@ Begin VB.Form frmEvent
       Caption         =   "Cancel"
       Height          =   375
       Left            =   3480
-      TabIndex        =   9
-      Top             =   3240
+      TabIndex        =   15
+      Top             =   4590
       Width           =   1095
    End
    Begin VB.CommandButton cmdOK
@@ -25,8 +25,8 @@ Begin VB.Form frmEvent
       Default         =   -1  'True
       Height          =   375
       Left            =   2280
-      TabIndex        =   8
-      Top             =   3240
+      TabIndex        =   14
+      Top             =   4590
       Width           =   1095
    End
    Begin VB.PictureBox picIcon
@@ -35,7 +35,7 @@ Begin VB.Form frmEvent
       Height          =   240
       Left            =   4335
       ScaleMode       =   3  'Pixel
-      TabIndex        =   10
+      TabIndex        =   16
       TabStop         =   0   'False
       Top             =   1178
       Width           =   240
@@ -46,9 +46,33 @@ Begin VB.Form frmEvent
       MaxLength       =   300
       MultiLine       =   -1  'True
       ScrollBars      =   2  'Vertical
-      TabIndex        =   7
-      Top             =   1890
+      TabIndex        =   13
+      Top             =   3240
       Width           =   4335
+   End
+   Begin VB.TextBox txtConnect
+      Height          =   315
+      Left            =   2280
+      MaxLength       =   120
+      TabIndex        =   11
+      Top             =   2490
+      Width           =   2295
+   End
+   Begin VB.TextBox txtServer
+      Height          =   315
+      Left            =   2280
+      MaxLength       =   40
+      TabIndex        =   9
+      Top             =   2040
+      Width           =   2295
+   End
+   Begin VB.ComboBox cboGame
+      Height          =   315
+      Left            =   2280
+      Style           =   2  'Dropdown List
+      TabIndex        =   7
+      Top             =   1590
+      Width           =   2295
    End
    Begin VB.ComboBox cboIcon
       Height          =   315
@@ -78,9 +102,33 @@ Begin VB.Form frmEvent
       Caption         =   "&Details (optional):"
       Height          =   255
       Left            =   240
+      TabIndex        =   12
+      Top             =   2985
+      Width           =   4335
+   End
+   Begin VB.Label lblConnect
+      Caption         =   "How to co&nnect:"
+      Height          =   255
+      Left            =   240
+      TabIndex        =   10
+      Top             =   2535
+      Width           =   1935
+   End
+   Begin VB.Label lblServer
+      Caption         =   "Game &server:"
+      Height          =   255
+      Left            =   240
+      TabIndex        =   8
+      Top             =   2085
+      Width           =   1935
+   End
+   Begin VB.Label lblGame
+      Caption         =   "&Game:"
+      Height          =   255
+      Left            =   240
       TabIndex        =   6
       Top             =   1635
-      Width           =   4335
+      Width           =   1935
    End
    Begin VB.Label lblIcon
       Caption         =   "&Icon:"
@@ -115,12 +163,29 @@ Attribute VB_Exposed = False
 ' Palms LAN Center - Add an event to today's schedule (host).
 Option Explicit
 
+Private mGameKey() As String     ' the Game list's games: their keys, like quake3/quake3
+
 Private Sub Form_Load()
     Dim i As Integer, t As Date
     For i = 0 To EVENT_KINDS - 1
         cboIcon.AddItem EventLabel(i)
     Next
     cboIcon.ListIndex = 0
+    FillGames
+    ' older Palms Servers have no game for an event
+    If Not frmMain.ServerHasProjector() Then
+        lblGame.Visible = False
+        cboGame.Visible = False
+        lblServer.Visible = False
+        txtServer.Visible = False
+        lblConnect.Visible = False
+        txtConnect.Visible = False
+        lblNote.Top = lblNote.Top - 1350
+        txtNote.Top = txtNote.Top - 1350
+        cmdOK.Top = cmdOK.Top - 1350
+        cmdCancel.Top = cmdCancel.Top - 1350
+        Me.Height = Me.Height - 1350
+    End If
     ' suggest the next half hour
     t = DateAdd("n", 30 - (Minute(Now) Mod 30), Now)
     txtTime.Text = Format$(t, "hh:nn")
@@ -132,6 +197,27 @@ Private Sub Form_Load()
         cmdCancel.Top = cmdOK.Top
         Me.Height = Me.Height - 1500
     End If
+End Sub
+
+Private Sub FillGames()
+    Dim lines() As String, i As Long, p As Long
+    cboGame.AddItem "(none)"
+    ReDim mGameKey(0 To 0)
+    lines = Split(LibGameList(), vbLf)
+    For i = 0 To UBound(lines)
+        p = InStr(lines(i), vbTab)
+        If p > 1 Then
+            cboGame.AddItem Mid$(lines(i), p + 1)
+            ReDim Preserve mGameKey(0 To cboGame.ListCount - 1)
+            mGameKey(cboGame.ListCount - 1) = Left$(lines(i), p - 1)
+        End If
+    Next
+    cboGame.ListIndex = 0
+End Sub
+
+' Picking a game names the event after it, if it has no name yet
+Private Sub cboGame_Click()
+    If cboGame.ListIndex > 0 And Len(Trim$(txtName.Text)) = 0 Then txtName.Text = cboGame.Text
 End Sub
 
 Private Sub cboIcon_Click()
@@ -169,9 +255,16 @@ Private Sub cmdOK_Click()
         Exit Sub
     End If
     If txtNote.Visible Then frmMain.SetPendingNote NoteFromText(txtNote.Text)
+    If cboGame.Visible And (cboGame.ListIndex > 0 Or Len(Trim$(txtServer.Text)) > 0 Or Len(Trim$(txtConnect.Text)) > 0) Then
+        frmMain.SetPendingGame mGameKey(cboGame.ListIndex) & "|" & NoBar(txtServer.Text) & "|" & NoBar(txtConnect.Text)
+    End If
     frmMain.SendLine "SCHEDADD|" & hm & "|" & EventKey(cboIcon.ListIndex) & "|" & nm
     Unload Me
 End Sub
+
+Private Function NoBar(ByVal s As String) As String
+    NoBar = Trim$(Replace(Replace(Replace(s, "|", "/"), vbCr, " "), vbLf, " "))
+End Function
 
 Private Sub cmdCancel_Click()
     Unload Me

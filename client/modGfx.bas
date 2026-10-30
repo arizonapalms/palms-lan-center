@@ -39,6 +39,7 @@ Private Declare Function CreateCompatibleDC Lib "gdi32" (ByVal hdc As Long) As L
 Private Declare Function CreateCompatibleBitmap Lib "gdi32" (ByVal hdc As Long, ByVal nWidth As Long, ByVal nHeight As Long) As Long
 Private Declare Function SelectObject Lib "gdi32" (ByVal hdc As Long, ByVal hObject As Long) As Long
 Private Declare Function DeleteDC Lib "gdi32" (ByVal hdc As Long) As Long
+Private Declare Function StretchBlt Lib "gdi32" (ByVal hDC As Long, ByVal x As Long, ByVal y As Long, ByVal nWidth As Long, ByVal nHeight As Long, ByVal hSrcDC As Long, ByVal xSrc As Long, ByVal ySrc As Long, ByVal nSrcWidth As Long, ByVal nSrcHeight As Long, ByVal dwRop As Long) As Long
 Private Declare Function BitBlt Lib "gdi32" (ByVal hDestDC As Long, ByVal x As Long, ByVal y As Long, ByVal nWidth As Long, ByVal nHeight As Long, ByVal hSrcDC As Long, ByVal xSrc As Long, ByVal ySrc As Long, ByVal dwRop As Long) As Long
 Private Declare Function GetDC Lib "user32" (ByVal hwnd As Long) As Long
 Private Declare Function ReleaseDC Lib "user32" (ByVal hwnd As Long, ByVal hdc As Long) As Long
@@ -292,6 +293,31 @@ Public Sub DrawGameIcon(p As PictureBox, ByVal slot As Long, ByVal big As Boolea
         BitBlt p.hDC, x, y, 16, 16, mGameDC(slot), 64, 0, SRCPAINT
         Touch p, x, y, 16, 16
     End If
+End Sub
+
+' A 32 px icon drawn bigger (or smaller): size by size pixels, for the projector
+Public Sub DrawIconSized(p As PictureBox, ByVal idx As Integer, ByVal x As Long, ByVal y As Long, ByVal size As Long)
+    Dim sx As Long, sy As Long
+    If Not mLoaded Or idx < 0 Or size < 1 Then Exit Sub
+    sx = (idx Mod 8) * 32
+    sy = (idx \ 8) * 32
+    If mFast Then
+        StretchBlt p.hDC, x, y, size, size, mDC(3), sx, sy, 32, 32, SRCAND
+        StretchBlt p.hDC, x, y, size, size, mDC(2), sx, sy, 32, 32, SRCPAINT
+        Touch p, x, y, size, size
+    Else
+        p.PaintPicture mMask32, x, y, size, size, sx, sy, 32, 32, vbSrcAnd
+        p.PaintPicture mSpr32, x, y, size, size, sx, sy, 32, 32, vbSrcPaint
+    End If
+End Sub
+
+' A game's 32 px icon drawn size by size pixels
+Public Sub DrawGameIconSized(p As PictureBox, ByVal slot As Long, ByVal x As Long, ByVal y As Long, ByVal size As Long)
+    If slot < 0 Or slot >= mGameCount Or size < 1 Then Exit Sub
+    If mGameDC(slot) = 0 Then Exit Sub
+    StretchBlt p.hDC, x, y, size, size, mGameDC(slot), 32, 0, 32, 32, SRCAND
+    StretchBlt p.hDC, x, y, size, size, mGameDC(slot), 0, 0, 32, 32, SRCPAINT
+    Touch p, x, y, size, size
 End Sub
 
 ' A Windows 98 progress bar: sunken, filling up with blue blocks

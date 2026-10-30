@@ -8,7 +8,8 @@ Everyone at the party runs it on their PC; it talks to a small server on the LAN
 - **Game Library**: install games from the Cartridge Server, and make new cartridges with the Make Cartridge Wizard
 - **Who's Here**: who's signed in, their seat on the seat map, and what PC they brought
 - **Tournaments**: sign-ups, single-elimination brackets and results
-- Pop-up notifications, and it updates itself when the host publishes a new version
+- **Projector**: slides for the big screen (now playing, schedule, brackets, the vote), full screen in the program or as a web page for Internet Explorer 5
+- Pop-up notifications
 
 It is written to run well on a Pentium III with an 800 x 600 screen.
 
@@ -18,9 +19,9 @@ It is written to run well on a Pentium III with an 800 x 600 screen.
 |---|---|---|
 | `client/` | Palms LAN Center, the program on each PC | Visual Basic 6.0 |
 | `palmsget/` | `palmsget.exe`, the small downloader the Game Library uses | C (MinGW) |
-| `server/` | Palms Server: chat, schedule, votes, tournaments, the file page | Python 3 |
+| `server/` | Palms Server: chat, schedule, votes, tournaments, the projector page | Python 3 |
 | `cartridge-server/` | Palms Cartridge Server: stores the cartridges, host approval | Python 3 |
-| `deploy/` | `palms-setup.sh`, installs either server (or both) on Debian 12 | Bash |
+| `deploy/` | `plc.sh`, installs or upgrades either server (or both) on Linux | Bash |
 | `setup/` | The Windows installer script | NSIS 3 |
 
 ## Building the client
@@ -39,21 +40,20 @@ Next to `PalmsLAN.exe`, the program needs:
 
 ## Running the servers
 
-On a Debian 12 machine, as root:
+On any Linux PC (Debian, Ubuntu, Fedora, RHEL/Rocky/Alma, Arch, Alpine, openSUSE; 32-bit or 64-bit; Python 3.7 or later), as root:
 
 ```
-bash deploy/palms-setup.sh
+bash deploy/plc.sh
 ```
-
-It asks which server to install, the network address and the computer name, shows a summary, then installs.
-See `deploy/README.txt` for the step by step.
+ It asks which server to install, the network address and the computer name,
+shows a summary, then installs. Run it again to upgrade. See `deploy/README.txt`.
 
 To try the Palms Server on any machine with Python 3: `python3 server/palms_server.py`.
 
 ## Building the installer
 
 ```
-makensis -DVERSION=0.9.2 -DSRC=<folder with the release files> -DOUT=PalmsLAN-0.9.2-setup.exe setup/PalmsLAN.nsi
+makensis -DVERSION=0.9.3-alpha -DNUMVER=0.9.3 -DSRC=<folder with the release files> -DOUT=PalmsLAN-0.9.3-alpha-setup.exe setup/PalmsLAN.nsi
 ```
 
 The release folder holds `PalmsLAN.exe`, `palmsget.exe`, `7za.exe`, `MSWINSCK.OCX`, the `.wav` files and
